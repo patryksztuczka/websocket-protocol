@@ -1,0 +1,19 @@
+{
+  "name": "server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "dev": "node --experimental-strip-types --watch ./src/index.ts",
+    "lint": "eslint --max-warnings 0",
+    "check-types": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "workspace:*",
+    "@repo/typescript-config": "workspace:*",
+    "@types/node": "^22",
+    "eslint": "^9.20.0",
+    "typescript": "5.7.3"
+  }
+}
