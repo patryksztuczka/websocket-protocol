@@ -1,8 +1,3 @@
-import net from "node:net";
-console.log("Hello from the Client");
+import { WebSocket } from "./socket.ts";
 
-const client = net.createConnection({
-  port: 80,
-});
-
-const dummyVar = 5;
+const socket = new WebSocket();
