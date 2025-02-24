@@ -46,7 +46,8 @@ export class WebSocket {
         const handshakeResult = this.parseHandshake(data);
 
         if (!handshakeResult.isValid) {
-          // handle
+          this.tcpSocket.destroy();
+          this.readyState = "closed";
           return;
         }
 
@@ -54,10 +55,10 @@ export class WebSocket {
           webSocketKey,
           handshakeResult.webSocketAccept
         );
-        console.log("acc", accept);
 
         if (!accept) {
-          // close conn
+          this.tcpSocket.destroy();
+          this.readyState = "closed";
           return;
         }
 

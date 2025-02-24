@@ -1,5 +1,6 @@
 import net from "node:net";
 import { createHash } from "crypto";
+import { sendHttpError } from "./utils/utils.ts";
 
 const PORT = 80;
 
@@ -13,6 +14,7 @@ type WebSocketHandshakeParseResult =
   | {
       isValid: false;
       error: string;
+      httpStatus: number;
     };
 
 export class WebSocketServer {
@@ -23,8 +25,9 @@ export class WebSocketServer {
         const handshakeResult = this.parseHandshake(data);
 
         if (!handshakeResult.isValid) {
-          // 403
-          console.log(handshakeResult.error);
+          const { httpStatus, error } = handshakeResult;
+          socket.write(sendHttpError(httpStatus, error));
+          socket.destroy();
           return;
         }
 
@@ -57,10 +60,23 @@ export class WebSocketServer {
     // Parse first line
     const [method, path, protocol] = lines[0].toLocaleString().split(" ");
 
-    if (method !== "GET" || !regex.test(path) || protocol !== "HTTP/1.1") {
+    if (method !== "GET") {
       return {
         isValid: false,
-        error: "Invalid request line",
+        httpStatus: 405,
+        error: "GET is the only valid method",
+      };
+    } else if (!regex.test(path)) {
+      return {
+        isValid: false,
+        httpStatus: 403,
+        error: "No access to the given resource",
+      };
+    } else if (protocol !== "HTTP/1.1") {
+      return {
+        isValid: false,
+        httpStatus: 400,
+        error: "Wrong protocol used",
       };
     }
 
@@ -88,6 +104,7 @@ export class WebSocketServer {
       if (headers.get(key) !== value) {
         return {
           isValid: false,
+          httpStatus: 400,
           error: `Invalid ${key} header`,
         };
       }
@@ -98,6 +115,7 @@ export class WebSocketServer {
     if (!webSocketKey) {
       return {
         isValid: false,
+        httpStatus: 400,
         error: "Missing Sec-WebSocket-Key header",
       };
     }
@@ -107,6 +125,7 @@ export class WebSocketServer {
     if (!host) {
       return {
         isValid: false,
+        httpStatus: 400,
         error: "Missing Host header",
       };
     }
