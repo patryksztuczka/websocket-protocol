@@ -1,1 +1,3 @@
-console.log("Hello from the Server");
+import { WebSocketServer } from "./web-socket-server.ts";
+
+const server = new WebSocketServer();
