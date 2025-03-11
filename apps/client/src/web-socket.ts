@@ -1,5 +1,6 @@
 import net from "node:net";
 import { randomBytes, createHash } from "crypto";
+import { Frame } from "./frame.ts";
 
 type WebSocketReadyState = "connecting" | "open" | "closing" | "closed";
 
@@ -17,6 +18,7 @@ const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 export class WebSocket {
   private tcpSocket: net.Socket;
+  private eventListeners = new Map<string, () => void>();
   public readyState: WebSocketReadyState;
 
   constructor() {
@@ -63,6 +65,7 @@ export class WebSocket {
         }
 
         this.readyState = "open";
+        this.emit("open");
       });
     });
 
@@ -141,5 +144,21 @@ export class WebSocket {
       .digest("base64");
 
     return expectedAccept === receivedAccept;
+  }
+
+  private emit(event: "open" | "message" | "close") {
+    const callback = this.eventListeners.get(event);
+    if (callback != undefined) {
+      callback();
+    }
+  }
+
+  public on(event: "open" | "message" | "close", callback: () => void) {
+    this.eventListeners.set(event, callback);
+  }
+
+  public send(payload: string) {
+    console.log("sending frame...");
+    const frame = new Frame(payload);
   }
 }
