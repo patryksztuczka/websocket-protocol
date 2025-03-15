@@ -1,8 +1,9 @@
 import net from "node:net";
 import { createHash } from "crypto";
 import { sendHttpError } from "./utils/utils.ts";
+import { randomBytes } from "node:crypto";
 
-const PORT = 80;
+const PORT = 8080;
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -18,9 +19,15 @@ type WebSocketHandshakeParseResult =
     };
 
 export class WebSocketServer {
-  constructor() {
+  private connections = new Map<string, net.Socket>();
+  private eventListeners = new Map<string, () => void>();
+
+  constructor() {}
+
+  public run() {
     const server = net.createServer((socket) => {
       socket.on("data", (data) => {
+        console.log(data);
         console.log("data from client:", data.toLocaleString().split("\r\n"));
         const handshakeResult = this.parseHandshake(data);
 
@@ -38,14 +45,27 @@ export class WebSocketServer {
             `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(handshakeResult.webSocketKey)}\r\n` +
             `\r\n`
         );
+        this.connections.set(
+          `${socket.remoteAddress}:${socket.remotePort}`,
+          socket
+        );
       });
+
+      socket.on("close", () => {
+        console.log("socket closed connection");
+        this.connections.delete(`${socket.remoteAddress}:${socket.remotePort}`);
+      });
+    });
+
+    server.on("connection", (s) => {
+      console.log("socket connected", s.remoteAddress, s.remotePort);
     });
 
     server.on("error", (error) => {
       throw error;
     });
 
-    server.listen(PORT, undefined, undefined, () => {
+    server.listen(PORT, "127.0.0.1", undefined, () => {
       console.log(`TCP Server running on port ${PORT}`);
     });
   }
@@ -140,5 +160,16 @@ export class WebSocketServer {
     return createHash("sha1")
       .update(key + WEBSOCKET_GUID)
       .digest("base64");
+  }
+
+  private emit(event: "message") {
+    const callback = this.eventListeners.get(event);
+    if (callback != undefined) {
+      callback();
+    }
+  }
+
+  public on(event: "message", callback: () => void) {
+    this.eventListeners.set(event, callback);
   }
 }

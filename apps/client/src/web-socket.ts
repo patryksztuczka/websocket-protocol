@@ -1,6 +1,5 @@
 import net from "node:net";
 import { randomBytes, createHash } from "crypto";
-import { Frame } from "./frame.ts";
 
 type WebSocketReadyState = "connecting" | "open" | "closing" | "closed";
 
@@ -23,11 +22,13 @@ export class WebSocket {
 
   constructor() {
     this.readyState = "connecting";
-
     this.tcpSocket = net.createConnection({
-      port: 80,
+      port: 8080,
+      host: "127.0.0.1",
     });
+  }
 
+  public run() {
     this.tcpSocket.on("connect", () => {
       this.tcpSocket.setEncoding("utf-8");
 
@@ -159,6 +160,29 @@ export class WebSocket {
 
   public send(payload: string) {
     console.log("sending frame...");
-    const frame = new Frame(payload);
+    const fin = 0x1;
+    const rsv = 0b000;
+    const opcode = 0x1;
+    const firstByte = (fin << 7) | (rsv << 4) | (opcode << 0);
+    console.log("firstByte:", firstByte);
+    const mask = 1;
+    const payloadLength = payload.length;
+    const secondByte = (mask << 7) | (payloadLength << 0);
+    console.log("second byte", secondByte);
+    const maskingKey = randomBytes(4);
+    console.log("3-6 bytes", ...maskingKey);
+    const encoder = new TextEncoder();
+    console.log(encoder.encode(payload));
+    console.log("all bytes: ", 2 + maskingKey.length + payloadLength);
+    const bytes = new Uint8Array([
+      firstByte,
+      secondByte,
+      ...maskingKey,
+      ...encoder.encode(payload),
+    ]);
+
+    console.log(bytes);
+
+    this.tcpSocket.write(bytes);
   }
 }
