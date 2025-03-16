@@ -26,7 +26,7 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 ## To Do
 
 - [X] Implement the initial handshake logic
-- [ ] Establish a basic framing mechanism
+- [X] Establish a basic framing mechanism
 - [ ] Handle fragmentation
 - [ ] Handle ping/pong frames
 - [ ] Properly close connections with status codes
