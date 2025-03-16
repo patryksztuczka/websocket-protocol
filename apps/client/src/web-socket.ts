@@ -162,7 +162,7 @@ export class WebSocket {
     console.log("sending frame...");
     const fin = 0b1;
     const rsv = 0b000;
-    const opcode = 0b1111;
+    const opcode = 0b0001;
     const firstByte = (fin << 7) | (rsv << 4) | opcode;
     console.log("firstByte:", firstByte);
     const mask = 1;
