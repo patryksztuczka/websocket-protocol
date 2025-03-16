@@ -15,6 +15,8 @@ type WebSocketHandshakeParseResult =
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+const MAX_PAYLOAD_SIZE = 125; // bytes
+
 export class WebSocket {
   private tcpSocket: net.Socket;
   private eventListeners = new Map<string, () => void>();
@@ -160,36 +162,97 @@ export class WebSocket {
 
   public send(payload: string) {
     console.log("sending frame...");
-    const fin = 0b1;
-    const rsv = 0b000;
-    const opcode = 0b0001;
-    const firstByte = (fin << 7) | (rsv << 4) | opcode;
-    console.log("firstByte:", firstByte);
-    const mask = 1;
     const payloadLength = payload.length;
-    const secondByte = (mask << 7) | (payloadLength << 0);
-    console.log("second byte", secondByte);
-    const maskingKey = randomBytes(4);
-    console.log("3-6 bytes", ...maskingKey);
     const encoder = new TextEncoder();
-    const encodedPayload = encoder.encode(payload);
-    console.log(encoder.encode(payload));
-    const maskedPayload = [];
 
-    for (let i = 0; i < payloadLength; i++) {
-      const maskedByte = encodedPayload[i] ^ maskingKey[i % 4];
-      maskedPayload.push(maskedByte);
+    if (payloadLength > MAX_PAYLOAD_SIZE) {
+      // fragment payload
+      const chunks = [];
+      for (let i = 0; i < payloadLength; i++) {
+        if ((i + 1) % MAX_PAYLOAD_SIZE === 0) {
+          chunks.push(
+            payload.slice(
+              chunks.length * MAX_PAYLOAD_SIZE,
+              (chunks.length + 1) * MAX_PAYLOAD_SIZE || MAX_PAYLOAD_SIZE
+            )
+          );
+        } else if (i === payloadLength - 1) {
+          chunks.push(payload.slice(chunks.length * MAX_PAYLOAD_SIZE));
+        }
+      }
+
+      // console.log("chunks", chunks);
+      for (let i = 0; i < chunks.length; i++) {
+        let fin = 0;
+        const rsv = 0b000;
+        let opcode = 0b0001;
+
+        if (i === chunks.length - 1) {
+          fin = 1;
+        }
+
+        if (i > 0) {
+          opcode = 0b0000;
+        }
+
+        const firstByte = (fin << 7) | (rsv << 4) | opcode;
+
+        const masked = 1;
+        const payloadLength = chunks[i].length;
+
+        const secondByte = (masked << 7) | (payloadLength << 0);
+        const maskingKey = randomBytes(4);
+        const encodedPayload = encoder.encode(chunks[i]);
+        const maskedPayload = [];
+
+        for (let i = 0; i < payloadLength; i++) {
+          const maskedByte = encodedPayload[i] ^ maskingKey[i % 4];
+          maskedPayload.push(maskedByte);
+        }
+
+        const bytes = new Uint8Array([
+          firstByte,
+          secondByte,
+          ...maskingKey,
+          ...maskedPayload,
+        ]);
+
+        console.log(chunks[i], maskedPayload);
+
+        this.tcpSocket.write(bytes);
+      }
+    } else {
+      // send single frame
+      const fin = 0b1;
+      const rsv = 0b000;
+      const opcode = 0b0001;
+      const firstByte = (fin << 7) | (rsv << 4) | opcode;
+      // console.log("firstByte:", firstByte);
+      const masked = 1;
+      const secondByte = (masked << 7) | (payloadLength << 0);
+      // console.log("second byte", secondByte);
+      const maskingKey = randomBytes(4);
+      // console.log("3-6 bytes", ...maskingKey);
+
+      const encodedPayload = encoder.encode(payload);
+      // console.log(encoder.encode(payload));
+      const maskedPayload = [];
+
+      for (let i = 0; i < payloadLength; i++) {
+        const maskedByte = encodedPayload[i] ^ maskingKey[i % 4];
+        maskedPayload.push(maskedByte);
+      }
+      // console.log("all bytes: ", 2 + maskingKey.length + payloadLength);
+      const bytes = new Uint8Array([
+        firstByte,
+        secondByte,
+        ...maskingKey,
+        ...maskedPayload,
+      ]);
+
+      // console.log(bytes);
+
+      this.tcpSocket.write(bytes);
     }
-    console.log("all bytes: ", 2 + maskingKey.length + payloadLength);
-    const bytes = new Uint8Array([
-      firstByte,
-      secondByte,
-      ...maskingKey,
-      ...maskedPayload,
-    ]);
-
-    console.log(bytes);
-
-    this.tcpSocket.write(bytes);
   }
 }

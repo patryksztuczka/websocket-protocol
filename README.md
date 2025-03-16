@@ -27,7 +27,7 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 
 - [X] Implement the initial handshake logic
 - [X] Establish a basic framing mechanism
-- [ ] Handle fragmentation
+- [X] Add masking/unmasking for client-sent data
+- [X] Add fragmentation mechanism
 - [ ] Handle ping/pong frames
 - [ ] Properly close connections with status codes
-- [ ] Add masking/unmasking for client-sent data

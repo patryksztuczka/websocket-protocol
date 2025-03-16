@@ -36,18 +36,22 @@ type WebSocketFrameParseResult =
     };
 
 export class WebSocketServer {
-  private connections = new Map<string, net.Socket>();
+  private connections = new Map<
+    string,
+    { socket: net.Socket; pendingPayload: string | null }
+  >();
 
   constructor() {}
 
   public run() {
     const server = net.createServer((socket) => {
       socket.on("data", (data) => {
-        if (
-          this.connections.has(`${socket.remoteAddress}:${socket.remotePort}`)
-        ) {
-          // parse frames
+        const conn = this.connections.get(
+          `${socket.remoteAddress}:${socket.remotePort}`
+        );
+        if (conn) {
           const result = this.parseFrame(data);
+
           if (!result.isValid) {
             // handle
             return;
@@ -55,7 +59,20 @@ export class WebSocketServer {
 
           const { data: frameData } = result;
 
-          console.log("PAYLOAD", frameData);
+          const { fin, opcode, payload } = frameData;
+
+          if (opcode === 0x0 || opcode === 0x1) {
+            if (!conn.pendingPayload) {
+              conn.pendingPayload = payload;
+            } else {
+              conn.pendingPayload += payload;
+            }
+          }
+
+          if (fin && conn.pendingPayload) {
+            console.log("WHOLE MESSAGE:", conn.pendingPayload);
+            conn.pendingPayload = null;
+          }
         } else {
           const handshakeResult = this.parseHandshake(data);
 
@@ -73,10 +90,10 @@ export class WebSocketServer {
               `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(handshakeResult.webSocketKey)}\r\n` +
               `\r\n`
           );
-          this.connections.set(
-            `${socket.remoteAddress}:${socket.remotePort}`,
-            socket
-          );
+          this.connections.set(`${socket.remoteAddress}:${socket.remotePort}`, {
+            socket,
+            pendingPayload: null,
+          });
         }
       });
 
@@ -96,15 +113,11 @@ export class WebSocketServer {
 
   private parseFrame(buffer: Buffer): WebSocketFrameParseResult {
     const data = [...buffer];
-    console.log("frame", data);
     const firstByte = data[0];
-    console.log("firstByte", firstByte);
     const fin = (firstByte & 0b10000000) >> 7;
-    console.log("fin", fin);
     const rsv = (firstByte & 0b01110000) >> 4;
-    console.log("rsv", rsv);
     const opcode = firstByte & 0b00001111;
-    console.log("opcode", opcode);
+
     if (opcode < 0x0 || (opcode >= 0x3 && opcode <= 0x7) || opcode > 0xa) {
       return {
         isValid: false,
@@ -113,21 +126,16 @@ export class WebSocketServer {
 
     const secondByte = data[1];
     const masked = (secondByte & 0b10000000) >> 7;
-    console.log("masked", masked);
     if (!masked) {
       return {
         isValid: false,
       };
     }
     const payloadLength = secondByte & 0b01111111;
-    console.log("payloadLength", payloadLength);
 
     const maskingKey = data.slice(2, 6);
-    console.log("maskingKey", maskingKey);
 
     const payload = data.slice(6);
-
-    console.log("payload", payload);
 
     const unmaskedPayload = [];
 
@@ -135,8 +143,6 @@ export class WebSocketServer {
       const unmaskedByte = payload[i] ^ maskingKey[i % 4];
       unmaskedPayload.push(unmaskedByte);
     }
-
-    console.log("unmasked payload", unmaskedPayload);
 
     const decoder = new TextDecoder();
 
