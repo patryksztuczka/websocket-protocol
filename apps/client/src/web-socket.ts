@@ -160,10 +160,10 @@ export class WebSocket {
 
   public send(payload: string) {
     console.log("sending frame...");
-    const fin = 0x1;
+    const fin = 0b1;
     const rsv = 0b000;
-    const opcode = 0x1;
-    const firstByte = (fin << 7) | (rsv << 4) | (opcode << 0);
+    const opcode = 0b1111;
+    const firstByte = (fin << 7) | (rsv << 4) | opcode;
     console.log("firstByte:", firstByte);
     const mask = 1;
     const payloadLength = payload.length;
@@ -172,13 +172,20 @@ export class WebSocket {
     const maskingKey = randomBytes(4);
     console.log("3-6 bytes", ...maskingKey);
     const encoder = new TextEncoder();
+    const encodedPayload = encoder.encode(payload);
     console.log(encoder.encode(payload));
+    const maskedPayload = [];
+
+    for (let i = 0; i < payloadLength; i++) {
+      const maskedByte = encodedPayload[i] ^ maskingKey[i % 4];
+      maskedPayload.push(maskedByte);
+    }
     console.log("all bytes: ", 2 + maskingKey.length + payloadLength);
     const bytes = new Uint8Array([
       firstByte,
       secondByte,
       ...maskingKey,
-      ...encoder.encode(payload),
+      ...maskedPayload,
     ]);
 
     console.log(bytes);

@@ -1,7 +1,5 @@
 import { WebSocketServer } from "./web-socket-server.ts";
 
-const server = new WebSocketServer().run();
+const server = new WebSocketServer();
 
-// server.on("message", () => {
-//   console.log("msg arrived");
-// });
+server.run();
