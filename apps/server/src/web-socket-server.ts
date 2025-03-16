@@ -2,9 +2,18 @@ import net from "node:net";
 import { createHash } from "crypto";
 import { sendHttpError } from "./utils/utils.ts";
 
-const PORT = 80;
+const PORT = 8080;
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+type WebSocketFrame = {
+  fin: number;
+  rsv: number;
+  opcode: number;
+  masked: number;
+  payloadLength: number;
+  payload: string;
+};
 
 type WebSocketHandshakeParseResult =
   | {
@@ -17,27 +26,62 @@ type WebSocketHandshakeParseResult =
       httpStatus: number;
     };
 
+type WebSocketFrameParseResult =
+  | {
+      isValid: true;
+      data: WebSocketFrame;
+    }
+  | {
+      isValid: false;
+    };
+
 export class WebSocketServer {
-  constructor() {
+  private connections = new Map<string, net.Socket>();
+
+  constructor() {}
+
+  public run() {
     const server = net.createServer((socket) => {
       socket.on("data", (data) => {
-        console.log("data from client:", data.toLocaleString().split("\r\n"));
-        const handshakeResult = this.parseHandshake(data);
+        if (
+          this.connections.has(`${socket.remoteAddress}:${socket.remotePort}`)
+        ) {
+          // parse frames
+          const result = this.parseFrame(data);
+          if (!result.isValid) {
+            // handle
+            return;
+          }
 
-        if (!handshakeResult.isValid) {
-          const { httpStatus, error } = handshakeResult;
-          socket.write(sendHttpError(httpStatus, error));
-          socket.destroy();
-          return;
+          const { data: frameData } = result;
+
+          console.log("PAYLOAD", frameData);
+        } else {
+          const handshakeResult = this.parseHandshake(data);
+
+          if (!handshakeResult.isValid) {
+            const { httpStatus, error } = handshakeResult;
+            socket.write(sendHttpError(httpStatus, error));
+            socket.destroy();
+            return;
+          }
+
+          socket.write(
+            `HTTP/1.1 101 Switching Protocols\r\n` +
+              `Upgrade: websocket\r\n` +
+              `Connection: Upgrade\r\n` +
+              `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(handshakeResult.webSocketKey)}\r\n` +
+              `\r\n`
+          );
+          this.connections.set(
+            `${socket.remoteAddress}:${socket.remotePort}`,
+            socket
+          );
         }
+      });
 
-        socket.write(
-          `HTTP/1.1 101 Switching Protocols\r\n` +
-            `Upgrade: websocket\r\n` +
-            `Connection: Upgrade\r\n` +
-            `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(handshakeResult.webSocketKey)}\r\n` +
-            `\r\n`
-        );
+      socket.on("close", () => {
+        this.connections.delete(`${socket.remoteAddress}:${socket.remotePort}`);
       });
     });
 
@@ -45,9 +89,68 @@ export class WebSocketServer {
       throw error;
     });
 
-    server.listen(PORT, undefined, undefined, () => {
+    server.listen(PORT, "127.0.0.1", undefined, () => {
       console.log(`TCP Server running on port ${PORT}`);
     });
+  }
+
+  private parseFrame(buffer: Buffer): WebSocketFrameParseResult {
+    const data = [...buffer];
+    console.log("frame", data);
+    const firstByte = data[0];
+    console.log("firstByte", firstByte);
+    const fin = (firstByte & 0b10000000) >> 7;
+    console.log("fin", fin);
+    const rsv = (firstByte & 0b01110000) >> 4;
+    console.log("rsv", rsv);
+    const opcode = firstByte & 0b00001111;
+    console.log("opcode", opcode);
+    if (opcode < 0x0 || (opcode >= 0x3 && opcode <= 0x7) || opcode > 0xa) {
+      return {
+        isValid: false,
+      };
+    }
+
+    const secondByte = data[1];
+    const masked = (secondByte & 0b10000000) >> 7;
+    console.log("masked", masked);
+    if (!masked) {
+      return {
+        isValid: false,
+      };
+    }
+    const payloadLength = secondByte & 0b01111111;
+    console.log("payloadLength", payloadLength);
+
+    const maskingKey = data.slice(2, 6);
+    console.log("maskingKey", maskingKey);
+
+    const payload = data.slice(6);
+
+    console.log("payload", payload);
+
+    const unmaskedPayload = [];
+
+    for (let i = 0; i < payloadLength; i++) {
+      const unmaskedByte = payload[i] ^ maskingKey[i % 4];
+      unmaskedPayload.push(unmaskedByte);
+    }
+
+    console.log("unmasked payload", unmaskedPayload);
+
+    const decoder = new TextDecoder();
+
+    return {
+      isValid: true,
+      data: {
+        fin,
+        rsv,
+        opcode,
+        masked,
+        payloadLength,
+        payload: decoder.decode(new Uint8Array(unmaskedPayload)),
+      },
+    };
   }
 
   private parseHandshake(data: Buffer): WebSocketHandshakeParseResult {
