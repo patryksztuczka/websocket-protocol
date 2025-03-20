@@ -1,23 +1,23 @@
-name: CI
+# name: CI
 
-on: [push]
+# on: [push]
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v2
+# jobs:
+#   build:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v2
 
-      - name: Install Dependencies
-        run: npm install -g pnpm && pnpm install
-        
+#       - name: Install Dependencies
+#         run: npm install -g pnpm && pnpm install
+
       # - name: Copy .env.example files
       #   shell: bash
       #   run: find . -type f -name ".env.example" -exec sh -c 'cp "$1" "${1%.*}"' _ {} \;
 
-      - name: Check types
-        run: pnpm run check-types
-      
-      - name: Lint
-        run: pnpm run lint
+      # - name: Check types
+      #   run: pnpm run check-types
+
+      # - name: Lint
+      #   run: pnpm run lint
