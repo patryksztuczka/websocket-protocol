@@ -16,9 +16,13 @@
     "strict": true,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
-    
+
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": true
-  }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+  ]
 }

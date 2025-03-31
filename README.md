@@ -5,6 +5,7 @@
 A custom, ground-up implementation of the [WebSocket Protocol (RFC 6455)](https://datatracker.ietf.org/doc/html/rfc6455). This repository explores how to establish and handle bi-directional communication between clients and servers using a single TCP connection.
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [To Do](#to-do)
 
@@ -13,6 +14,7 @@ A custom, ground-up implementation of the [WebSocket Protocol (RFC 6455)](https:
 ## Overview
 
 This project focuses on the essential components of WebSockets:
+
 - **Handshake**: Using the `Upgrade` header to transition from HTTP/1.1 to WebSocket.
 - **Framing**: Structuring data in a standard format for transmission.
 - **Ping/Pong**: Verifying connection health and liveness.
@@ -25,9 +27,9 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 
 ## To Do
 
-- [X] Implement the initial handshake logic
-- [X] Establish a basic framing mechanism
-- [X] Add masking/unmasking for client-sent data
-- [X] Add fragmentation mechanism
+- [x] Implement the initial handshake logic
+- [x] Establish a basic framing mechanism
+- [x] Add masking/unmasking for client-sent data
+- [ ] Add fragmentation mechanism
 - [ ] Handle ping/pong frames
 - [ ] Properly close connections with status codes

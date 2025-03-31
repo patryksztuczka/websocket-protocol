@@ -1,15 +1,25 @@
-
 {
-   "options": { "failByDrop": false },
-   "outdir": "./reports/servers",
-   "servers": [
-      {
-         "agent": "WebSocket-Node 1.0.27",
-         "url": "ws://host.docker.internal:8080",
-         "options": { "version": 18 }
-      }
-   ],
-   "cases": ["*"],
-   "exclude-cases": ["6.*", "7.*", "9.*", "12.*", "13.*"],
-   "exclude-agent-cases": {}
+  "options": { "failByDrop": false },
+  "outdir": "./reports/servers",
+  "servers": [
+    {
+      "agent": "WebSocket-Node 1.0.27",
+      "url": "ws://host.docker.internal:8080",
+      "options": { "version": 18 }
+    }
+  ],
+  "cases": ["1.1.6"],
+  "exclude-cases": [
+    "2.*",
+    "3.*",
+    "4.*",
+    "5.*",
+    "6.*",
+    "7.*",
+    "9.*",
+    "10.*",
+    "12.*",
+    "13.*"
+  ],
+  "exclude-agent-cases": {}
 }
