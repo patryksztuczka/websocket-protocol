@@ -5,9 +5,7 @@ import { WebSocketFrame } from "./web-socket-frame.ts";
 
 export class WebSocketConnection extends EventEmitter {
   private socket: Socket;
-  private buffer: Buffer;
-  private currentFrame: WebSocketFrame;
-  private fragments: WebSocketFrame[];
+  private buffer: Buffer = Buffer.allocUnsafe(0);
 
   constructor(socket: Socket) {
     super();
@@ -21,7 +19,7 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private handleSocketData(data: Buffer) {
-    this.buffer = data;
+    this.buffer = Buffer.from([...this.buffer, ...data]);
     this.processReceivedData();
   }
 
@@ -34,17 +32,24 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private processReceivedData() {
+    console.log("new frame");
     const frame = new WebSocketFrame();
 
-    this.currentFrame = frame;
-
+    // pause processing if frame data is incomplete
     if (!frame.addData(this.buffer)) {
-      // handle
-      this.sendCloseFrame(1002);
+      console.log("frame not complete - waiting...");
       return;
     }
 
-    switch (frame.opcode) {
+    console.log("buffer len", this.buffer.length);
+    console.log("frame len", frame.toBuffer().length);
+
+    // 4 is number of masking key bytes
+    this.buffer = Buffer.from(
+      [...this.buffer].slice(frame.toBuffer().length + 4),
+    );
+
+    switch (frame.getOpcode()) {
       case 0x0:
         // continuation frame
         break;
@@ -52,7 +57,7 @@ export class WebSocketConnection extends EventEmitter {
       case 0x1:
         this.emit("message", {
           type: "text",
-          payload: frame.binaryPayload.toString("ascii"),
+          payload: frame.getBinaryPayload().toString("ascii"),
         });
         break;
       case 0x2:
@@ -72,11 +77,15 @@ export class WebSocketConnection extends EventEmitter {
         // pong
         break;
     }
+
+    if (this.buffer.length > 0) {
+      // TODO: check if this can block other connections processing
+      this.processReceivedData();
+    }
   }
 
   private sendCloseFrame(status: number) {
     const closeFrame = new WebSocketFrame();
-    this.currentFrame = closeFrame;
     closeFrame
       .setFin(1)
       .setRsv(0x000)
@@ -88,14 +97,11 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private sendFrame(frame: WebSocketFrame) {
-    console.log("sending...", frame.binaryPayload);
     this.socket.write(frame.toBuffer());
   }
 
   public send(message: string) {
     const frame = new WebSocketFrame();
-
-    this.currentFrame = frame;
 
     frame
       .setFin(1)

@@ -27,9 +27,16 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 
 ## To Do
 
-- [x] Implement the initial handshake logic
-- [x] Establish a basic framing mechanism
-- [x] Add masking/unmasking for client-sent data
-- [ ] Add fragmentation mechanism
-- [ ] Handle ping/pong frames
-- [ ] Properly close connections with status codes
+### ✔️ Completed
+- [x] **Initial Handshake** — Implemented the opening handshake logic as per RFC 6455.
+- [x] **Basic Framing** — Established the foundational structure for framing WebSocket messages.
+- [x] **Masking Support** — Added masking and unmasking for client-sent payloads.
+- [x] **Text Message Handling** — Supported text frames with payload lengths of 7-bit, 16-bit, and 64-bit.
+
+### ⏳ In Progress / Planned
+- [ ] **Binary Frame Support** — Implement binary message handling.
+- [ ] **Ping/Pong Frames** — Implement heartbeat mechanisms for connection liveness.
+- [ ] **Opcode Handling** — Properly differentiate and handle control and non-control opcodes.
+- [ ] **Fragmentation Support** — Add support for fragmented messages.
+- [ ] **Fragmentation Mechanism** — Implement reassembly logic for fragmented frames.
+- [ ] **Connection Closure** — Handle connection teardown with appropriate status codes.

@@ -8,13 +8,13 @@ type ParseState =
 
 export class WebSocketFrame {
   private parseState: ParseState;
-  public fin: number;
-  public rsv: number;
-  public opcode: number;
-  public masked: number;
-  public payloadLength: number;
-  public maskingKey: Buffer;
-  public binaryPayload: Buffer;
+  private fin: number;
+  private rsv: number;
+  private opcode: number;
+  private masked: number;
+  private payloadLength: number;
+  private maskingKey: Buffer;
+  private binaryPayload: Buffer;
 
   constructor() {
     this.parseState = "DECODE_HEADER";
@@ -28,9 +28,16 @@ export class WebSocketFrame {
       this.rsv = (firstByte & 0b01110000) >> 4;
       this.opcode = firstByte & 0b00001111;
 
+      console.log("fin", this.fin);
+      console.log("rsv", this.rsv);
+      console.log("opcode", this.opcode);
+
       const secondByte = data[1];
       this.masked = (secondByte & 0b10000000) >> 7;
       const payloadLength = secondByte & 0b01111111;
+
+      console.log("masked", this.masked);
+      console.log("payload length", payloadLength);
 
       if (payloadLength >= 0 && payloadLength <= 125) {
         this.parseState = "WAITING_FOR_MASK_KEY";
@@ -48,6 +55,7 @@ export class WebSocketFrame {
       const lengthBytes = data.slice(2, 4);
       const buffer = new Uint8Array(lengthBytes).buffer;
       const view = new DataView(buffer);
+      console.log("extended payload length", view.getUint16(0, false));
       this.payloadLength = view.getUint16(0, false);
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
@@ -56,7 +64,7 @@ export class WebSocketFrame {
       const lengthBytes = data.slice(2, 10);
       const buffer = new Uint8Array(lengthBytes).buffer;
       const view = new DataView(buffer);
-      this.payloadLength = view.getBigUint64(0, false);
+      this.payloadLength = Number(view.getBigUint64(0, false));
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
@@ -66,6 +74,7 @@ export class WebSocketFrame {
           this.maskingKey = Buffer.from(data.slice(2, 6));
         } else if (this.payloadLength <= 65535) {
           this.maskingKey = Buffer.from(data.slice(4, 8));
+          console.log("masking key", this.maskingKey.toString("hex"));
         } else if (this.payloadLength <= 18446744073709551615) {
           this.maskingKey = Buffer.from(data.slice(10, 14));
         }
@@ -76,27 +85,29 @@ export class WebSocketFrame {
     }
 
     if (this.parseState === "WAITING_FOR_PAYLOAD") {
-      let payload: number[] = [];
+      console.log("payload len", buffer.length);
+      if (buffer.length >= this.payloadLength + 2) {
+        let payload: number[] = [];
+        if (this.payloadLength <= 125) {
+          payload = data.slice(6);
+        } else if (this.payloadLength <= 65535) {
+          payload = data.slice(8, this.payloadLength + 8);
+        } else if (this.payloadLength <= 18446744073709551615) {
+          payload = data.slice(14);
+        }
+        const unmaskedPayload = [];
 
-      if (this.payloadLength <= 125) {
-        payload = data.slice(6);
-      } else if (this.payloadLength <= 65535) {
-        payload = data.slice(8);
-      } else if (this.payloadLength <= 18446744073709551615) {
-        payload = data.slice(14);
+        for (let i = 0; i < this.payloadLength; i++) {
+          const unmaskedByte = payload[i] ^ this.maskingKey.readUInt8(i % 4);
+          unmaskedPayload.push(unmaskedByte);
+        }
+
+        this.binaryPayload = Buffer.from(unmaskedPayload);
+        console.log("BIN", this.binaryPayload.toString("ascii"));
+        this.parseState = "COMPLETE";
+
+        return true;
       }
-
-      const unmaskedPayload = [];
-
-      for (let i = 0; i < this.payloadLength; i++) {
-        const unmaskedByte = payload[i] ^ this.maskingKey.readUInt8(i % 4);
-        unmaskedPayload.push(unmaskedByte);
-      }
-
-      this.binaryPayload = Buffer.from(unmaskedPayload);
-      this.parseState = "COMPLETE";
-
-      return true;
     }
 
     return false;
@@ -110,6 +121,10 @@ export class WebSocketFrame {
   public setRsv(rsv: number) {
     this.rsv = rsv;
     return this;
+  }
+
+  public getOpcode() {
+    return this.opcode;
   }
 
   public setOpcode(opcode: number) {
@@ -137,6 +152,10 @@ export class WebSocketFrame {
     return this;
   }
 
+  public getBinaryPayload() {
+    return this.binaryPayload;
+  }
+
   public toBuffer(): Buffer {
     const firstByte = (this.fin << 7) | (this.rsv << 4) | this.opcode;
 
@@ -159,7 +178,7 @@ export class WebSocketFrame {
       this.payloadLength > 65535 &&
       this.payloadLength <= 18446744073709551615
     ) {
-      extendedLenBuf = Buffer.alloc(2);
+      extendedLenBuf = Buffer.alloc(8);
       extendedLenBuf.writeBigUInt64BE(BigInt(this.payloadLength));
     }
 
