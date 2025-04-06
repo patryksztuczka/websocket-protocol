@@ -41,9 +41,6 @@ export class WebSocketConnection extends EventEmitter {
       return;
     }
 
-    console.log("buffer len", this.buffer.length);
-    console.log("frame len", frame.toBuffer().length);
-
     // 4 is number of masking key bytes
     this.buffer = Buffer.from(
       [...this.buffer].slice(frame.toBuffer().length + 4),
@@ -57,11 +54,14 @@ export class WebSocketConnection extends EventEmitter {
       case 0x1:
         this.emit("message", {
           type: "text",
-          payload: frame.getBinaryPayload().toString("ascii"),
+          payload: frame.getTextPayload().toString("ascii"),
         });
         break;
       case 0x2:
-        // binary frame
+        this.emit("binaryMessage", {
+          type: "binary",
+          payload: frame.getBinaryPayload(),
+        });
         break;
       case 0x8:
         this.emit("end");
@@ -100,15 +100,16 @@ export class WebSocketConnection extends EventEmitter {
     this.socket.write(frame.toBuffer());
   }
 
-  public send(message: string) {
+  public send(type: "text" | "binary", message: string) {
     const frame = new WebSocketFrame();
 
-    frame
-      .setFin(1)
-      .setRsv(0x000)
-      .setOpcode(0x1)
-      .setMasked(0)
-      .setMessage(message);
+    frame.setFin(1).setRsv(0x000).setMasked(0);
+
+    if (type === "text") {
+      frame.setOpcode(0x1).setTextPayload(message);
+    } else if (type === "binary") {
+      frame.setOpcode(0x2).setBinaryPayload(message);
+    }
 
     this.sendFrame(frame);
   }

@@ -32,9 +32,9 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 - [x] **Basic Framing** — Established the foundational structure for framing WebSocket messages.
 - [x] **Masking Support** — Added masking and unmasking for client-sent payloads.
 - [x] **Text Message Handling** — Supported text frames with payload lengths of 7-bit, 16-bit, and 64-bit.
+- [x] **Binary Frame Support** — Implement binary message handling.
 
 ### ⏳ In Progress / Planned
-- [ ] **Binary Frame Support** — Implement binary message handling.
 - [ ] **Ping/Pong Frames** — Implement heartbeat mechanisms for connection liveness.
 - [ ] **Opcode Handling** — Properly differentiate and handle control and non-control opcodes.
 - [ ] **Fragmentation Support** — Add support for fragmented messages.
