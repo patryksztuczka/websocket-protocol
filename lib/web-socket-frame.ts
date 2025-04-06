@@ -9,7 +9,8 @@ type ParseState =
 type ParseError =
   | "PAYLOAD_TOO_LARGE"
   | "RESERVED_BITS_USED"
-  | "RESERVED_OPCODE_USED";
+  | "RESERVED_OPCODE_USED"
+  | "CONTROL_FRAME_CAN_NOT_BE_FRAGMENTED";
 
 export class WebSocketFrame {
   private parseState: ParseState;
@@ -30,7 +31,6 @@ export class WebSocketFrame {
   public addData(buffer: Buffer): boolean {
     if (buffer.length < 2) return false;
     if (this.parseState === "DECODE_HEADER") {
-      console.log(buffer);
       const firstByte = buffer.readUInt8(0);
       this.fin = (firstByte & 0b10000000) >> 7;
       this.rsv = (firstByte & 0b01110000) >> 4;
@@ -46,6 +46,14 @@ export class WebSocketFrame {
         (this.opcode >= 11 && this.opcode <= 15)
       ) {
         this.error = "RESERVED_OPCODE_USED";
+        return false;
+      }
+
+      if (
+        !this.fin &&
+        (this.opcode === 8 || this.opcode === 9 || this.opcode === 10)
+      ) {
+        this.error = "CONTROL_FRAME_CAN_NOT_BE_FRAGMENTED";
         return false;
       }
 
@@ -137,6 +145,10 @@ export class WebSocketFrame {
     }
 
     return false;
+  }
+
+  public getFin() {
+    return this.fin;
   }
 
   public setFin(fin: number) {

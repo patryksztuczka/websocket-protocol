@@ -3,11 +3,10 @@ import type { Socket } from "node:net";
 
 import { WebSocketFrame } from "./web-socket-frame.ts";
 
-type ConnectionState = "CONNECTED";
-
 export class WebSocketConnection extends EventEmitter {
   private socket: Socket;
   private buffer: Buffer = Buffer.allocUnsafe(0);
+  private fragments: WebSocketFrame[] = [];
 
   constructor(socket: Socket) {
     super();
@@ -22,7 +21,6 @@ export class WebSocketConnection extends EventEmitter {
 
   private handleSocketData(data: Buffer) {
     this.buffer = Buffer.from([...this.buffer, ...data]);
-    console.log("new data", data);
     this.processReceivedData();
   }
 
@@ -48,8 +46,6 @@ export class WebSocketConnection extends EventEmitter {
       return;
     }
 
-    console.log("frame length", frame.toBuffer().length);
-    console.log("connection buffer length", this.buffer.length);
     // 4 is number of masking key bytes
     this.buffer = Buffer.from(
       [...this.buffer].slice(frame.toBuffer().length + 4),
@@ -57,16 +53,47 @@ export class WebSocketConnection extends EventEmitter {
 
     switch (frame.getOpcode()) {
       case 0x0:
-        // continuation frame
+        if (
+          (this.fragments.length === 0 && frame.getFin()) ||
+          this.fragments.length === 0
+        ) {
+          this.sendCloseFrame(1002);
+          return;
+        }
+        this.fragments.push(frame);
+        if (frame.getFin()) {
+          // make message and emit
+          const message = this.combineMessage();
+          console.log("mess", message);
+          this.emit("message", {
+            type: "text",
+            payload: message,
+          });
+          this.fragments = [];
+        }
         break;
 
       case 0x1:
-        this.emit("message", {
-          type: "text",
-          payload: frame.getTextPayload().toString("ascii"),
-        });
+        if (this.fragments.length !== 0) {
+          this.sendCloseFrame(1002);
+          return;
+        }
+        this.fragments.push(frame);
+        if (frame.getFin()) {
+          // make message and emit
+
+          const message = this.combineMessage();
+
+          this.emit("message", {
+            type: "text",
+            payload: message,
+          });
+          this.fragments = [];
+        }
+
         break;
       case 0x2:
+        // handle binary frames fragmentation
         this.emit("binaryMessage", {
           type: "binary",
           payload: frame.getBinaryPayload(),
@@ -90,6 +117,15 @@ export class WebSocketConnection extends EventEmitter {
       // TODO: check if this can block other connections processing
       this.processReceivedData();
     }
+  }
+
+  private combineMessage(): string {
+    const fragments = this.fragments;
+    const combinedMessage = fragments
+      .map((fragment) => fragment.getTextPayload().toString("ascii"))
+      .join("");
+
+    return combinedMessage;
   }
 
   private sendCloseFrame(status: number) {
