@@ -33,10 +33,10 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 - [x] **Masking Support** — Added masking and unmasking for client-sent payloads.
 - [x] **Text Message Handling** — Supported text frames with payload lengths of 7-bit, 16-bit, and 64-bit.
 - [x] **Binary Frame Support** — Implement binary message handling.
+- [x] **Ping/Pong Frames** — Implement heartbeat mechanisms for connection liveness.
+- [x] **Opcode Handling** — Properly differentiate and handle control and non-control opcodes.
+- [x] **Fragmentation Support** — Add support for fragmented messages.
 
 ### ⏳ In Progress / Planned
-- [ ] **Ping/Pong Frames** — Implement heartbeat mechanisms for connection liveness.
-- [ ] **Opcode Handling** — Properly differentiate and handle control and non-control opcodes.
-- [ ] **Fragmentation Support** — Add support for fragmented messages.
-- [ ] **Fragmentation Mechanism** — Implement reassembly logic for fragmented frames.
+- [ ] **UTF-8 Validation** — Ensure all text frames contain valid UTF-8 as required by the spec.
 - [ ] **Connection Closure** — Handle connection teardown with appropriate status codes.
