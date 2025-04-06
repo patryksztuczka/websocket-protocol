@@ -3,6 +3,8 @@ import type { Socket } from "node:net";
 
 import { WebSocketFrame } from "./web-socket-frame.ts";
 
+type ConnectionState = "CONNECTED";
+
 export class WebSocketConnection extends EventEmitter {
   private socket: Socket;
   private buffer: Buffer = Buffer.allocUnsafe(0);
@@ -20,6 +22,7 @@ export class WebSocketConnection extends EventEmitter {
 
   private handleSocketData(data: Buffer) {
     this.buffer = Buffer.from([...this.buffer, ...data]);
+    console.log("new data", data);
     this.processReceivedData();
   }
 
@@ -37,10 +40,16 @@ export class WebSocketConnection extends EventEmitter {
 
     // pause processing if frame data is incomplete
     if (!frame.addData(this.buffer)) {
-      console.log("frame not complete - waiting...");
+      console.log("frame not complete or error thrown - waiting...");
+      if (frame.error) {
+        console.log("ERR", frame.error);
+        this.sendCloseFrame(1002);
+      }
       return;
     }
 
+    console.log("frame length", frame.toBuffer().length);
+    console.log("connection buffer length", this.buffer.length);
     // 4 is number of masking key bytes
     this.buffer = Buffer.from(
       [...this.buffer].slice(frame.toBuffer().length + 4),
@@ -66,15 +75,14 @@ export class WebSocketConnection extends EventEmitter {
       case 0x8:
         this.emit("end");
         this.sendCloseFrame(1000);
-        this.socket.end();
         break;
 
       case 0x9:
-        // ping
+        this.sendPongFrame(frame.getTextPayload());
         break;
 
       case 0xa:
-        // pong
+        this.sendPingFrame(frame.getTextPayload());
         break;
     }
 
@@ -93,11 +101,37 @@ export class WebSocketConnection extends EventEmitter {
       .setMasked(0)
       .setStatus(status);
 
-    this.sendFrame(closeFrame);
+    this.sendFrame(closeFrame, () => {
+      this.socket.destroy();
+    });
   }
 
-  private sendFrame(frame: WebSocketFrame) {
-    this.socket.write(frame.toBuffer());
+  private sendPingFrame(message: string) {
+    const pingFrame = new WebSocketFrame();
+    pingFrame
+      .setFin(1)
+      .setRsv(0x000)
+      .setOpcode(0x9)
+      .setMasked(0)
+      .setTextPayload(message);
+    this.sendFrame(pingFrame);
+  }
+
+  private sendPongFrame(message: string) {
+    const pongFrame = new WebSocketFrame();
+    pongFrame
+      .setFin(1)
+      .setRsv(0x000)
+      .setOpcode(0xa)
+      .setMasked(0)
+      .setTextPayload(message);
+    this.sendFrame(pongFrame);
+  }
+
+  private sendFrame(frame: WebSocketFrame, cb?: () => void) {
+    this.socket.write(frame.toBuffer(), () => {
+      if (cb) cb();
+    });
   }
 
   public send(type: "text" | "binary", message: string) {

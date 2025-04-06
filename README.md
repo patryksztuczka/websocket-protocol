@@ -1,4 +1,4 @@
-# WebSocket RFC6455 Implementation
+# WebSocket RFC6455 — Educational Implementation
 
 [![RFC6455](https://img.shields.io/badge/WebSocket-RFC%206455-brightgreen)](https://datatracker.ietf.org/doc/html/rfc6455)
 

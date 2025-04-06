@@ -6,6 +6,11 @@ type ParseState =
   | "WAITING_FOR_PAYLOAD"
   | "COMPLETE";
 
+type ParseError =
+  | "PAYLOAD_TOO_LARGE"
+  | "RESERVED_BITS_USED"
+  | "RESERVED_OPCODE_USED";
+
 export class WebSocketFrame {
   private parseState: ParseState;
   private fin: number = 0;
@@ -16,17 +21,33 @@ export class WebSocketFrame {
   private maskingKey: Buffer = Buffer.alloc(0);
   private textPayload: Buffer = Buffer.alloc(0);
   private binaryPayload: Buffer = Buffer.alloc(0);
+  public error: ParseError | undefined = undefined;
 
   constructor() {
     this.parseState = "DECODE_HEADER";
   }
 
   public addData(buffer: Buffer): boolean {
+    if (buffer.length < 2) return false;
     if (this.parseState === "DECODE_HEADER") {
+      console.log(buffer);
       const firstByte = buffer.readUInt8(0);
       this.fin = (firstByte & 0b10000000) >> 7;
       this.rsv = (firstByte & 0b01110000) >> 4;
       this.opcode = firstByte & 0b00001111;
+
+      if (this.rsv !== 0) {
+        this.error = "RESERVED_BITS_USED";
+        return false;
+      }
+
+      if (
+        (this.opcode >= 3 && this.opcode <= 7) ||
+        (this.opcode >= 11 && this.opcode <= 15)
+      ) {
+        this.error = "RESERVED_OPCODE_USED";
+        return false;
+      }
 
       const secondByte = buffer.readUInt8(1);
       this.masked = (secondByte & 0b10000000) >> 7;
@@ -57,6 +78,13 @@ export class WebSocketFrame {
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
+    if (this.opcode === 8 || this.opcode === 9 || this.opcode === 10) {
+      if (this.payloadLength > 125) {
+        this.error = "PAYLOAD_TOO_LARGE";
+        return false;
+      }
+    }
+
     if (this.parseState === "WAITING_FOR_MASK_KEY") {
       if (this.masked) {
         if (this.payloadLength <= 125) {
@@ -73,7 +101,8 @@ export class WebSocketFrame {
     }
 
     if (this.parseState === "WAITING_FOR_PAYLOAD") {
-      if (buffer.length >= this.payloadLength + 2) {
+      // 6 = firstByte + secondByte + 4 maskBytes
+      if (buffer.length >= this.payloadLength + 6) {
         // TODO: verify is it ok to alloc 0 - probably it's not
         let payload: Buffer = Buffer.alloc(0);
         if (this.payloadLength <= 125) {
@@ -90,6 +119,8 @@ export class WebSocketFrame {
           const unmaskedByte = payload[i] ^ this.maskingKey.readUInt8(i % 4);
           unmaskedPayload.writeUInt8(unmaskedByte, i);
         }
+
+        console.log("unmasked.length", unmaskedPayload.length);
 
         if (this.opcode === 1) {
           this.textPayload = unmaskedPayload;

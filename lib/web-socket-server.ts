@@ -25,12 +25,14 @@ export class WebSocketServer extends EventEmitter {
       wsRequest.readRequest();
     } catch (err) {
       // handle error
+      console.log("Read request error");
     }
 
     const connection = wsRequest.acceptRequest();
 
     if (!connection) {
       // handle error
+      console.log("Connection error");
       return;
     }
 
