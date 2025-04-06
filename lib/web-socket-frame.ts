@@ -8,43 +8,36 @@ type ParseState =
 
 export class WebSocketFrame {
   private parseState: ParseState;
-  private fin: number;
-  private rsv: number;
-  private opcode: number;
-  private masked: number;
-  private payloadLength: number;
-  private maskingKey: Buffer;
-  private binaryPayload: Buffer;
+  private fin: number = 0;
+  private rsv: number = 0;
+  private opcode: number = 0;
+  private masked: number = 0;
+  private payloadLength: number = 0;
+  private maskingKey: Buffer = Buffer.alloc(0);
+  private textPayload: Buffer = Buffer.alloc(0);
+  private binaryPayload: Buffer = Buffer.alloc(0);
 
   constructor() {
     this.parseState = "DECODE_HEADER";
   }
 
   public addData(buffer: Buffer): boolean {
-    const data = [...buffer];
     if (this.parseState === "DECODE_HEADER") {
-      const firstByte = data[0];
+      const firstByte = buffer.readUInt8(0);
       this.fin = (firstByte & 0b10000000) >> 7;
       this.rsv = (firstByte & 0b01110000) >> 4;
       this.opcode = firstByte & 0b00001111;
 
-      console.log("fin", this.fin);
-      console.log("rsv", this.rsv);
-      console.log("opcode", this.opcode);
-
-      const secondByte = data[1];
+      const secondByte = buffer.readUInt8(1);
       this.masked = (secondByte & 0b10000000) >> 7;
-      const payloadLength = secondByte & 0b01111111;
+      const length = secondByte & 0b01111111;
 
-      console.log("masked", this.masked);
-      console.log("payload length", payloadLength);
-
-      if (payloadLength >= 0 && payloadLength <= 125) {
+      if (length >= 0 && length <= 125) {
         this.parseState = "WAITING_FOR_MASK_KEY";
-        this.payloadLength = payloadLength;
-      } else if (payloadLength === 126) {
+        this.payloadLength = length;
+      } else if (length === 126) {
         this.parseState = "WAITING_FOR_16_BIT_LENGTH";
-      } else if (payloadLength === 127) {
+      } else if (length === 127) {
         this.parseState = "WAITING_FOR_64_BIT_LENGTH";
       } else {
         return false;
@@ -52,31 +45,26 @@ export class WebSocketFrame {
     }
 
     if (this.parseState === "WAITING_FOR_16_BIT_LENGTH") {
-      const lengthBytes = data.slice(2, 4);
-      const buffer = new Uint8Array(lengthBytes).buffer;
-      const view = new DataView(buffer);
-      console.log("extended payload length", view.getUint16(0, false));
-      this.payloadLength = view.getUint16(0, false);
+      const lengthBytes = buffer.subarray(2, 4);
+      this.payloadLength = lengthBytes.readUint16BE();
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
     if (this.parseState === "WAITING_FOR_64_BIT_LENGTH") {
-      const lengthBytes = data.slice(2, 10);
-      const buffer = new Uint8Array(lengthBytes).buffer;
-      const view = new DataView(buffer);
-      this.payloadLength = Number(view.getBigUint64(0, false));
+      const lengthBytes = buffer.subarray(2, 10);
+      // TODO: verify if this conversion can lead to an error
+      this.payloadLength = Number(lengthBytes.readBigInt64BE());
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
     if (this.parseState === "WAITING_FOR_MASK_KEY") {
       if (this.masked) {
         if (this.payloadLength <= 125) {
-          this.maskingKey = Buffer.from(data.slice(2, 6));
+          this.maskingKey = buffer.subarray(2, 6);
         } else if (this.payloadLength <= 65535) {
-          this.maskingKey = Buffer.from(data.slice(4, 8));
-          console.log("masking key", this.maskingKey.toString("hex"));
+          this.maskingKey = buffer.subarray(4, 8);
         } else if (this.payloadLength <= 18446744073709551615) {
-          this.maskingKey = Buffer.from(data.slice(10, 14));
+          this.maskingKey = buffer.subarray(10, 14);
         }
         this.parseState = "WAITING_FOR_PAYLOAD";
       } else {
@@ -85,25 +73,32 @@ export class WebSocketFrame {
     }
 
     if (this.parseState === "WAITING_FOR_PAYLOAD") {
-      console.log("payload len", buffer.length);
       if (buffer.length >= this.payloadLength + 2) {
-        let payload: number[] = [];
+        // TODO: verify is it ok to alloc 0 - probably it's not
+        let payload: Buffer = Buffer.alloc(0);
         if (this.payloadLength <= 125) {
-          payload = data.slice(6);
+          payload = buffer.subarray(6);
         } else if (this.payloadLength <= 65535) {
-          payload = data.slice(8, this.payloadLength + 8);
+          payload = buffer.subarray(8, this.payloadLength + 8);
         } else if (this.payloadLength <= 18446744073709551615) {
-          payload = data.slice(14);
+          payload = buffer.subarray(14);
         }
-        const unmaskedPayload = [];
+
+        const unmaskedPayload = Buffer.alloc(this.payloadLength);
 
         for (let i = 0; i < this.payloadLength; i++) {
           const unmaskedByte = payload[i] ^ this.maskingKey.readUInt8(i % 4);
-          unmaskedPayload.push(unmaskedByte);
+          unmaskedPayload.writeUInt8(unmaskedByte, i);
         }
 
-        this.binaryPayload = Buffer.from(unmaskedPayload);
-        console.log("BIN", this.binaryPayload.toString("ascii"));
+        if (this.opcode === 1) {
+          this.textPayload = unmaskedPayload;
+        } else if (this.opcode === 2) {
+          this.binaryPayload = unmaskedPayload;
+        } else {
+          this.textPayload = unmaskedPayload;
+        }
+
         this.parseState = "COMPLETE";
 
         return true;
@@ -137,10 +132,25 @@ export class WebSocketFrame {
     return this;
   }
 
-  public setMessage(message: string) {
+  public getTextPayload() {
+    return this.textPayload;
+  }
+
+  public setTextPayload(message: string) {
     const payload = Buffer.from(message);
     this.payloadLength = payload.length;
-    this.binaryPayload = payload;
+    this.textPayload = payload;
+    return this;
+  }
+
+  public getBinaryPayload() {
+    return this.binaryPayload;
+  }
+
+  public setBinaryPayload(message: string) {
+    const payload = Buffer.from(message);
+    this.payloadLength = payload.length;
+    this.textPayload = payload;
     return this;
   }
 
@@ -148,12 +158,8 @@ export class WebSocketFrame {
     const buffer = Buffer.alloc(2);
     buffer.writeUInt16BE(status);
     this.payloadLength = buffer.length;
-    this.binaryPayload = buffer;
+    this.textPayload = buffer;
     return this;
-  }
-
-  public getBinaryPayload() {
-    return this.binaryPayload;
   }
 
   public toBuffer(): Buffer {
@@ -186,12 +192,14 @@ export class WebSocketFrame {
       firstByte,
       secondByte,
       ...(extendedLenBuf ?? []),
+      ...this.textPayload,
       ...this.binaryPayload,
     ]);
+
     return buffer;
   }
 
   public toString(): string {
-    return `fin:${this.fin}rsv:${this.rsv}opcode:${this.opcode}masked:${this.masked}key:${this.maskingKey?.toString("ascii")}payloadLength:${this.payloadLength}payload:${this.binaryPayload?.toString("ascii")}`;
+    return `fin:${this.fin}rsv:${this.rsv}opcode:${this.opcode}masked:${this.masked}key:${this.maskingKey.toString("ascii")}payloadLength:${this.payloadLength}payload:${this.textPayload.toString("ascii") || this.binaryPayload.toString()}`;
   }
 }

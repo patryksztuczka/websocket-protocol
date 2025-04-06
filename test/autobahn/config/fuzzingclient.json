@@ -8,7 +8,7 @@
       "options": { "version": 18 }
     }
   ],
-  "cases": ["1.1.*"],
+  "cases": ["1.1.*", "1.2.*"],
   "exclude-cases": [
     "2.*",
     "3.*",

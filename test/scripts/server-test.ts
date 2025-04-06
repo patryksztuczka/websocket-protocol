@@ -13,8 +13,13 @@ const wsServer = new WebSocketServer(httpServer);
 
 wsServer.on("connect", (connection: WebSocketConnection) => {
   connection.addSocketEventListeners();
+  // TODO: improve type-safety for available events
   connection.on("message", (message) => {
-    connection.send(message.payload);
+    connection.send("text", message.payload);
+  });
+
+  connection.on("binaryMessage", (message) => {
+    connection.send("binary", message.payload);
   });
 
   connection.on("end", () => {
