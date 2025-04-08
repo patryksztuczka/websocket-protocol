@@ -36,11 +36,13 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 - [x] **Binary Frame Support** — Implement binary message handling.
 - [x] **Ping/Pong Frames** — Implement heartbeat mechanisms for connection liveness.
 - [x] **Opcode Handling** — Properly differentiate and handle control and non-control opcodes.
-- [x] **Fragmentation Support** — Add support for fragmented messages.
 
 ### ⏳ In Progress / Planned
+- [ ] **Fragmentation Support** — Add support for fragmented messages.
 - [ ] **UTF-8 Validation** — Ensure all text frames contain valid UTF-8 as required by the spec.
 - [ ] **Connection Closure** — Handle connection teardown with appropriate status codes.
+- [ ] **Router Implementation** — Design and implement a lightweight internal router to dispatch messages to appropriate handlers based on message type or path.
+- [ ] **Client Compliance Testing** — Add test scenarios and validations to ensure the client-side implementation behaves correctly and adheres to RFC6455, including handshake logic, frame formatting, and connection management.
 
 ---
 
