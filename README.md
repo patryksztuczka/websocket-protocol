@@ -8,6 +8,7 @@ A custom, ground-up implementation of the [WebSocket Protocol (RFC 6455)](https:
 
 - [Overview](#overview)
 - [To Do](#to-do)
+- [Test Suite](#test-suite)
 
 ---
 
@@ -40,3 +41,27 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 ### ⏳ In Progress / Planned
 - [ ] **UTF-8 Validation** — Ensure all text frames contain valid UTF-8 as required by the spec.
 - [ ] **Connection Closure** — Handle connection teardown with appropriate status codes.
+
+---
+
+## Test Suite
+
+This project uses the [Autobahn Test Suite](https://github.com/crossbario/autobahn-testsuite) to validate compliance with RFC 6455.
+
+The tests are designed to rigorously evaluate this implementation against a broad set of edge cases and protocol requirements.
+
+### 🧪 Running Tests
+
+To run the test suite:
+
+1. Navigate to the test directory:
+
+   ```bash
+   cd ./test/autobahn
+   ```
+   
+2. Execute the test runner script:
+
+   ```bash
+   sh ./run-wstest.sh
+   ```
