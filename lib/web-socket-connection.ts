@@ -105,7 +105,8 @@ export class WebSocketConnection extends EventEmitter {
         break;
 
       case 0xa:
-        this.sendPingFrame(frame.getTextPayload());
+        // a pong may arrive unsolicited as a heartbeat and must not be answered (RFC 6455 5.5.3)
+        this.emit("pong", frame.getTextPayload());
         break;
     }
 
@@ -136,17 +137,6 @@ export class WebSocketConnection extends EventEmitter {
     this.sendFrame(closeFrame, () => {
       this.socket.destroy();
     });
-  }
-
-  private sendPingFrame(message: Buffer) {
-    const pingFrame = new WebSocketFrame();
-    pingFrame
-      .setFin(1)
-      .setRsv(0x000)
-      .setOpcode(0x9)
-      .setMasked(0)
-      .setTextPayload(message);
-    this.sendFrame(pingFrame);
   }
 
   private sendPongFrame(message: Buffer) {
