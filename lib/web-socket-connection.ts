@@ -25,9 +25,12 @@ export class WebSocketConnection extends EventEmitter {
   private received = new ReceiveBuffer();
   // the frame being read; it is kept between "data" events until it is complete
   private frame = new WebSocketFrame();
-  private fragments: WebSocketFrame[] = [];
+  // payloads of the message being reassembled
+  private fragments: Buffer[] = [];
   // payload bytes in `fragments`
   private fragmentsLength = 0;
+  // opcode of the message's first frame: 0x1 text or 0x2 binary
+  private messageOpcode = 0;
 
   constructor(
     socket: Socket,
@@ -91,51 +94,32 @@ export class WebSocketConnection extends EventEmitter {
 
       switch (frame.getOpcode()) {
         case 0x0:
-          if (
-            (this.fragments.length === 0 && frame.getFin()) ||
-            this.fragments.length === 0
-          ) {
+          // a continuation frame only makes sense while a fragmented message
+          // is in progress (RFC 6455 section 5.4)
+          if (this.fragments.length === 0) {
             this.sendCloseFrame(1002);
             return;
           }
-          this.fragments.push(frame);
-          if (frame.getFin()) {
-            // make message and emit
-            const message = this.combineMessage();
-            this.emit("message", {
-              type: "text",
-              payload: message,
-            });
-            this.fragments = [];
-          }
+          this.addFragment(frame.getTextPayload(), frame.getFin());
           break;
 
         case 0x1:
+        case 0x2:
+          // a new message can't start before the fragmented one in progress
+          // has ended, whatever its type (RFC 6455 section 5.4)
           if (this.fragments.length !== 0) {
             this.sendCloseFrame(1002);
             return;
           }
-          this.fragments.push(frame);
-          if (frame.getFin()) {
-            // make message and emit
-
-            const message = this.combineMessage();
-
-            this.emit("message", {
-              type: "text",
-              payload: message,
-            });
-            this.fragments = [];
-          }
-
+          this.messageOpcode = frame.getOpcode();
+          this.addFragment(
+            this.messageOpcode === 0x1
+              ? frame.getTextPayload()
+              : frame.getBinaryPayload(),
+            frame.getFin(),
+          );
           break;
-        case 0x2:
-          // handle binary frames fragmentation
-          this.emit("binaryMessage", {
-            type: "binary",
-            payload: frame.getBinaryPayload(),
-          });
-          break;
+
         case 0x8:
           this.emit("end");
           this.sendCloseFrame(1000);
@@ -160,14 +144,31 @@ export class WebSocketConnection extends EventEmitter {
     }
   }
 
-  private combineMessage(): string {
-    // text is UTF-8 (RFC 6455 section 5.6) and a character can be split
-    // across fragments, so join the bytes first and decode them once
-    const payloads = this.fragments.map((fragment) =>
-      fragment.getTextPayload(),
-    );
+  /** Adds a fragment and emits the message once its last fragment arrives. */
+  private addFragment(payload: Buffer, fin: number) {
+    this.fragments.push(payload);
+    if (!fin) return;
 
-    return Buffer.concat(payloads).toString("utf8");
+    const fragments = this.fragments;
+    this.fragments = [];
+    // a message sent in one frame needs no copy
+    const message =
+      fragments.length === 1 ? fragments[0] : Buffer.concat(fragments);
+
+    // the message has the type of its first frame (RFC 6455 section 5.4)
+    if (this.messageOpcode === 0x1) {
+      // text is UTF-8 (RFC 6455 section 5.6) and a character can be split
+      // across fragments, so join the bytes first and decode them once
+      this.emit("message", {
+        type: "text",
+        payload: message.toString("utf8"),
+      });
+    } else {
+      this.emit("binaryMessage", {
+        type: "binary",
+        payload: message,
+      });
+    }
   }
 
   private sendCloseFrame(status: number) {
