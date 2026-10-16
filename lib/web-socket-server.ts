@@ -40,5 +40,9 @@ export class WebSocketServer extends EventEmitter {
 
     this.emit("connect", connection);
     this.connections.push(connection);
+    // forget the connection once it has closed
+    socket.once("close", () => {
+      this.connections = this.connections.filter((c) => c !== connection);
+    });
   }
 }

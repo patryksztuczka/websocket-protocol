@@ -235,14 +235,6 @@ export class WebSocketFrame {
     return this;
   }
 
-  public setStatus(status: number) {
-    const buffer = Buffer.alloc(2);
-    buffer.writeUInt16BE(status);
-    this.payloadLength = buffer.length;
-    this.textPayload = buffer;
-    return this;
-  }
-
   /**
    * Encodes the frame for sending. When the frame is masked, a fresh random
    * masking key is made on every call and the payload is masked into a new
