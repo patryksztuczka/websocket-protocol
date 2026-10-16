@@ -23,16 +23,12 @@ export class WebSocketServer extends EventEmitter {
 
     try {
       wsRequest.readRequest();
-    } catch {
-      // TODO: reject the handshake instead of carrying on (#14)
+    } catch (error) {
+      wsRequest.rejectRequest(error);
+      return;
     }
 
     const connection = wsRequest.acceptRequest();
-
-    if (!connection) {
-      // TODO: reject the handshake with an HTTP error response (#14)
-      return;
-    }
 
     this.emit("connect", connection);
     this.connections.push(connection);
