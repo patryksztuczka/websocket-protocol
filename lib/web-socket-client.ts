@@ -46,7 +46,9 @@ export class WebSocketClient extends EventEmitter {
     this.validateHandshake(response);
   }
 
-  private handleRequestError() {}
+  private handleRequestError() {
+    // TODO: report the failed request to the app (#19)
+  }
 
   private validateHandshake(response: IncomingMessage) {
     if (response.statusCode !== 101) {
@@ -82,7 +84,7 @@ export class WebSocketClient extends EventEmitter {
   }
 
   private failHandshake(errorMessage: string) {
-    // handle close/end/destroy socket
+    // TODO: close the socket when the handshake fails (#19)
     this.emit("connectionFailed", errorMessage);
   }
 
