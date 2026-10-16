@@ -486,7 +486,8 @@ export class WebSocketConnection extends EventEmitter {
 
   /**
    * Sends a close frame. Leaving out `code` sends an empty one. The
-   * connection then enters "closing" and the close timer starts.
+   * connection then enters "closing"; the close timer starts once the frame
+   * has been written, which may be later if a compression is still running.
    */
   private sendCloseFrame(code?: number, reason = "") {
     if (this.closeSent) return;
@@ -501,12 +502,20 @@ export class WebSocketConnection extends EventEmitter {
 
     const closeFrame = new WebSocketFrame();
     closeFrame.setFin(1).setRsv(0x000).setOpcode(0x8).setTextPayload(payload);
+    // a frame that can't be written won't start the timer, so start it here
+    if (!this.socket.writable) this.startCloseTimer();
     this.sendFrame(closeFrame);
 
     // the close frame is the last frame this side sends (RFC 6455 section 5.5.1)
     this.closeSent = true;
     if (this.state === "open") this.state = "closing";
+  }
 
+  /**
+   * Destroys the socket if the closing handshake hasn't finished
+   * `closeTimeout` milliseconds after the close frame was written.
+   */
+  private startCloseTimer() {
     this.closeTimer = setTimeout(
       () => this.socket.destroy(),
       this.closeTimeout,
@@ -571,6 +580,7 @@ export class WebSocketConnection extends EventEmitter {
     // (RFC 6455 section 5.1)
     frame.setMasked(this.role === "client" ? 1 : 0);
     this.socket.write(frame.toBuffer());
+    if (frame.getOpcode() === 0x8) this.startCloseTimer();
   }
 
   /**

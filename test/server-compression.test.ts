@@ -7,7 +7,8 @@ import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 import net from "node:net";
-import { after, before, describe, test } from "node:test";
+import { after, before, describe, mock, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import zlib from "node:zlib";
 
 import type {
@@ -212,6 +213,7 @@ async function echoServer(options: WebSocketConnectionOptions) {
   await once(httpServer, "listening");
   return {
     httpServer,
+    wsServer,
     port: (httpServer.address() as net.AddressInfo).port,
   };
 }
@@ -512,5 +514,124 @@ describe("server without perMessageDeflate (the default)", () => {
     client.socket.write(frame(0x1, compress("Hello"), { rsv: 0b100 }));
     await client.expectClose(1002);
     client.close();
+  });
+});
+
+describe("server with perMessageDeflate: timing and cleanup", () => {
+  let httpServer: Server;
+  let wsServer: WebSocketServer;
+  let port: number;
+  // the server's connections, in the order they were accepted
+  const connections: WebSocketConnection[] = [];
+
+  before(async () => {
+    ({ httpServer, wsServer, port } = await echoServer({
+      perMessageDeflate: true,
+      closeTimeout: 50,
+    }));
+    wsServer.on("connect", (connection: WebSocketConnection) =>
+      connections.push(connection),
+    );
+  });
+
+  after(() => {
+    for (const socket of sockets) socket.destroy();
+    httpServer.close();
+  });
+
+  test("frames that arrive while a message inflates are read after it", async () => {
+    const client = await RawClient.connect(port, "permessage-deflate");
+    // 4 MiB that compresses to about 3 MiB, so inflating it takes a while
+    const big = randomBytes(3 * 1024 * 1024).toString("base64");
+    const bigFrame = frame(0x1, compress(big), { rsv: 0b100 });
+    // send all but the last byte and give the server time to read it...
+    await new Promise((resolve) =>
+      client.socket.write(bigFrame.subarray(0, -1), resolve),
+    );
+    await delay(50);
+    // ...so the last byte arrives alone and starts the inflating, and each
+    // frame after it arrives in a chunk of its own while that runs
+    client.socket.write(bigFrame.subarray(-1));
+    await delay(1);
+    client.socket.write(frame(0x1, "after"));
+    await delay(1);
+    client.socket.write(frame(0x9, "ping"));
+    await delay(1);
+    client.socket.write(frame(0x2, Buffer.from([1, 2, 3])));
+
+    const echoBig = await client.nextFrame();
+    const echoText = await client.nextFrame();
+    const pong = await client.nextFrame();
+    const echoBinary = await client.nextFrame();
+    assert.equal(echoBig?.rsv, 0b100);
+    assert.equal((await client.inflate(echoBig.payload)).toString(), big);
+    assert.equal(echoText?.payload.toString(), "after");
+    assert.equal(pong?.opcode, 0xa);
+    assert.deepEqual(echoBinary?.payload, Buffer.from([1, 2, 3]));
+    client.close();
+  });
+
+  test("the close timer starts when the close frame is written, not while it waits for a compression", async (t) => {
+    const client = await RawClient.connect(port, "permessage-deflate");
+    const connection = connections.at(-1)!;
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    // the echo starts compressing, close() queues the close frame behind it,
+    // then more than closeTimeout passes before the compression is done
+    connection.once("message", () => {
+      connection.close(1000);
+      t.mock.timers.tick(100);
+    });
+    client.socket.write(frame(0x1, LONG_TEXT));
+
+    const echo = await client.nextFrame();
+    assert.equal(echo?.rsv, 0b100);
+    assert.equal((await client.inflate(echo.payload)).toString(), LONG_TEXT);
+    await client.expectClose(1000);
+    t.mock.timers.reset();
+    client.close();
+  });
+
+  test("closing the connection closes its zlib streams", async () => {
+    const created: (zlib.DeflateRaw | zlib.InflateRaw)[] = [];
+    const { createDeflateRaw, createInflateRaw } = zlib;
+    const deflate = mock.method(
+      zlib,
+      "createDeflateRaw",
+      (options?: zlib.ZlibOptions) => {
+        const stream = createDeflateRaw(options);
+        created.push(stream);
+        return stream;
+      },
+    );
+    const inflate = mock.method(
+      zlib,
+      "createInflateRaw",
+      (options?: zlib.ZlibOptions) => {
+        const stream = createInflateRaw(options);
+        created.push(stream);
+        return stream;
+      },
+    );
+
+    try {
+      const client = await RawClient.connect(port, "permessage-deflate");
+      const connection = connections.at(-1)!;
+      // only the server's streams count, not the test client's inflater
+      created.length = 0;
+      // a compressed message and its compressed echo use both streams
+      client.socket.write(frame(0x1, compress(LONG_TEXT), { rsv: 0b100 }));
+      assert.equal((await client.nextFrame())?.rsv, 0b100);
+      assert.equal(created.length, 2);
+      assert.ok(created.every((stream) => !stream.destroyed));
+
+      const closed = once(connection, "close");
+      client.socket.write(frame(0x8, Buffer.from([0x03, 0xe8])));
+      await closed;
+      assert.ok(created.every((stream) => stream.destroyed));
+      client.close();
+    } finally {
+      deflate.mock.restore();
+      inflate.mock.restore();
+    }
   });
 });
