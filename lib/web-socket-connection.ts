@@ -1,4 +1,5 @@
 import EventEmitter from "node:events";
+import type { IncomingHttpHeaders } from "node:http";
 import type { Socket } from "node:net";
 
 import { ReceiveBuffer } from "./receive-buffer.ts";
@@ -20,6 +21,19 @@ export interface WebSocketConnectionOptions {
    * socket is destroyed.
    */
   closeTimeout?: number;
+}
+
+/** What the opening handshake said about the connection. */
+export interface WebSocketHandshakeInfo {
+  /** The path the connection was opened on, without the query, e.g. "/rooms/42". */
+  path: string;
+  /** The query of the address, e.g. `query.get("token")` for "?token=abc". */
+  query: URLSearchParams;
+  /**
+   * On the server, the headers of the client's request. On the client, the
+   * headers of the server's 101 answer. Names are lowercase.
+   */
+  headers: IncomingHttpHeaders;
 }
 
 /** 64 MiB */
@@ -50,6 +64,12 @@ const isValidCloseCode = (code: number) =>
   (code >= 3000 && code <= 4999);
 
 export class WebSocketConnection extends EventEmitter {
+  /** The path the connection was opened on, without the query, e.g. "/rooms/42". */
+  public readonly path: string;
+  /** The query of the address the connection was opened on. */
+  public readonly query: URLSearchParams;
+  /** The handshake headers; see WebSocketHandshakeInfo.headers. */
+  public readonly headers: IncomingHttpHeaders;
   private socket: Socket;
   private role: WebSocketRole;
   private maxMessageSize: number;
@@ -83,8 +103,16 @@ export class WebSocketConnection extends EventEmitter {
     socket: Socket,
     role: WebSocketRole,
     options: WebSocketConnectionOptions = {},
+    handshake: WebSocketHandshakeInfo = {
+      path: "/",
+      query: new URLSearchParams(),
+      headers: {},
+    },
   ) {
     super();
+    this.path = handshake.path;
+    this.query = handshake.query;
+    this.headers = handshake.headers;
     this.socket = socket;
     this.role = role;
     this.maxMessageSize = options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE;

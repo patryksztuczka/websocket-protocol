@@ -11,6 +11,8 @@ export class WebSocketClient extends EventEmitter {
   private req: ClientRequest | null = null;
   private websocketKey!: string;
   private socket: Socket | null = null;
+  // the address being connected to; the connection keeps its path and query
+  private target: URL | null = null;
   // set once "connect" or "connectionFailed" has been emitted, so only one of them is
   private settled = false;
 
@@ -41,6 +43,7 @@ export class WebSocketClient extends EventEmitter {
 
     this.settled = false;
     this.socket = null;
+    this.target = target;
     // a fresh random 16-byte key for every handshake (RFC 6455 section 4.1)
     this.websocketKey = randomBytes(16).toString("base64");
 
@@ -148,7 +151,7 @@ export class WebSocketClient extends EventEmitter {
       return;
     }
 
-    this.succeedHandshake(head);
+    this.succeedHandshake(response, head);
   }
 
   private failConnection(reason: string) {
@@ -161,11 +164,20 @@ export class WebSocketClient extends EventEmitter {
     this.emit("connectionFailed", reason);
   }
 
-  private succeedHandshake(head: Buffer) {
-    if (this.settled || !this.socket) return;
+  private succeedHandshake(response: IncomingMessage, head: Buffer) {
+    if (this.settled || !this.socket || !this.target) return;
     this.settled = true;
 
-    const connection = new WebSocketConnection(this.socket, "client");
+    const connection = new WebSocketConnection(
+      this.socket,
+      "client",
+      {},
+      {
+        path: this.target.pathname,
+        query: new URLSearchParams(this.target.search),
+        headers: response.headers,
+      },
+    );
 
     // frames the server sent right after its answer can arrive in the same
     // packet; put them back so the connection reads them before anything else

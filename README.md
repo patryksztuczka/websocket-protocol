@@ -69,6 +69,20 @@ httpServer.listen(8080);
 
 `close(code, reason)` starts the closing handshake. The `close` event fires once the TCP connection has closed, with the code and reason from the other side's close frame (1005 if it had no code, 1006 if none arrived). `new WebSocketServer(httpServer, { maxMessageSize, closeTimeout })` sets the largest message accepted (64 MiB by default) and how long to wait for the closing handshake (5 seconds by default).
 
+To decide whether a connection opens, listen to `request`. It fires for every handshake that passed the protocol checks, before the server answers. The request has `path`, `query` (a `URLSearchParams`) and `headers`. Call `accept()` to open the connection, which also emits `connect`, or `reject(status, reason)` to answer with an HTTP error such as 401 or 404 and close the TCP connection. Either can be called later, for example after an async auth check, but only once. When nothing listens to `request`, every valid request is accepted. The connection keeps the `path`, `query` and `headers` it was opened with.
+
+```ts
+wsServer.on("request", (request) => {
+  if (request.path !== "/chat") {
+    request.reject(404);
+  } else if (request.query.get("token") !== "secret") {
+    request.reject(401, "Missing or wrong token");
+  } else {
+    request.accept();
+  }
+});
+```
+
 The client is `WebSocketClient`. `client.connect("ws://127.0.0.1:8080/")` emits `connect` with a connection that has the same events and methods, or `connectionFailed` with the reason. [`test/scripts/client-test.ts`](test/scripts/client-test.ts) shows it in use.
 
 ---
@@ -136,7 +150,7 @@ You need Node 24 or newer, which runs the `.ts` files directly, and [pnpm](https
    pnpm autobahn:check
    ```
 
-The client tests start their own server, so they don't need the steps above:
+The `node:test` tests for the client and the server's `request` event start their own servers, so they don't need the steps above:
 
 ```bash
 pnpm test
