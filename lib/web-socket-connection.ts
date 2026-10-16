@@ -77,6 +77,7 @@ export class WebSocketConnection extends EventEmitter {
   private closeReason = "";
   // destroys the socket if the closing handshake doesn't finish in time
   private closeTimer: NodeJS.Timeout | undefined;
+  private listening = false;
 
   constructor(
     socket: Socket,
@@ -94,7 +95,14 @@ export class WebSocketConnection extends EventEmitter {
     return this.state;
   }
 
+  /**
+   * Starts reading from the socket. Server connections need this call; the
+   * client makes it by itself right after "connect". Calling it again does
+   * nothing, so frames are never read twice.
+   */
   public addSocketEventListeners() {
+    if (this.listening) return;
+    this.listening = true;
     this.socket.on("data", this.handleSocketData.bind(this));
     this.socket.on("close", this.handleSocketClose.bind(this));
     this.socket.on("end", this.handleSocketEnd.bind(this));
