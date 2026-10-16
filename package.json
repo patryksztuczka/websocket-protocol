@@ -8,7 +8,7 @@
     "lint": "vp lint",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check",
-    "test": "node --test \"test/**/*.test.ts\"",
+    "test": "node --test --test-timeout=10000 \"test/**/*.test.ts\"",
     "server": "node test/scripts/server-test.ts",
     "autobahn": "sh test/autobahn/run-wstest.sh",
     "autobahn:check": "node test/autobahn/check-report.ts"

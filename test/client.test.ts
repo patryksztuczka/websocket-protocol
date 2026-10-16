@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type OutgoingHttpHeaders, type Server } from "node:http";
 import https from "node:https";
 import net from "node:net";
-import { after, before, describe, test } from "node:test";
+import { after, before, describe, test, type TestContext } from "node:test";
 import tls from "node:tls";
 
 import {
@@ -36,11 +36,45 @@ const key = readFileSync(
   new URL("fixtures/localhost-key.pem", import.meta.url),
 );
 
+// how long a test waits for a connection or a message before it fails
+const WAIT_TIMEOUT_MS = 3000;
+
+// the TCP connections each test server has open, so stop() can drop them
+const openSockets = new WeakMap<net.Server, Set<net.Socket>>();
+
 /** Resolves with the port once the server listens on a free one. */
 async function listen(server: net.Server | Server): Promise<number> {
+  const sockets = new Set<net.Socket>();
+  openSockets.set(server, sockets);
+  // a tls.Server emits the plain TCP socket here, before the TLS handshake
+  server.on("connection", (socket: net.Socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   return (server.address() as net.AddressInfo).port;
+}
+
+/**
+ * Closes the server and drops every connection it still has, so a test that
+ * failed halfway can't keep the process running.
+ */
+function stop(server: net.Server | Server) {
+  server.close();
+  for (const socket of openSockets.get(server) ?? []) socket.destroy();
+}
+
+/** Rejects if `promise` hasn't settled after WAIT_TIMEOUT_MS. */
+function withTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Timed out waiting for ${what}`)),
+      WAIT_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 /** Connects and resolves with the connection, or rejects with the failure reason. */
@@ -48,7 +82,7 @@ function connect(
   url: string,
   options?: WebSocketClientOptions,
 ): Promise<WebSocketConnection> {
-  return new Promise((resolve, reject) => {
+  const connected = new Promise<WebSocketConnection>((resolve, reject) => {
     const client = new WebSocketClient();
     client.on("connect", resolve);
     client.on("connectionFailed", (reason: string) =>
@@ -56,14 +90,16 @@ function connect(
     );
     client.connect(url, options);
   });
+  return withTimeout(connected, `a connection to ${url}`);
 }
 
 /** Resolves with the next text or binary message on the connection. */
 function nextMessage(connection: WebSocketConnection): Promise<Message> {
-  return new Promise((resolve) => {
+  const message = new Promise<Message>((resolve) => {
     connection.once("message", resolve);
     connection.once("binaryMessage", resolve);
   });
+  return withTimeout(message, "a message");
 }
 
 /** Closes the connection with the closing handshake. */
@@ -75,8 +111,10 @@ function end(connection: WebSocketConnection) {
  * A raw TCP server that reads the client's handshake request and answers with
  * whatever `respond` returns, so tests can send answers the real server never would.
  * With `secure` it speaks TLS with the fixture certificate and gives a wss: address.
+ * The server stops once the test `t` has finished.
  */
 async function fakeServer(
+  t: TestContext,
   respond: (key: string) => string | Buffer,
   { secure = false } = {},
 ) {
@@ -97,6 +135,7 @@ async function fakeServer(
     ? tls.createServer({ cert, key }, onConnection)
     : net.createServer(onConnection);
   const port = await listen(server);
+  t.after(() => stop(server));
   const scheme = secure ? "wss" : "ws";
   return { server, sockets, url: `${scheme}://127.0.0.1:${port}/` };
 }
@@ -130,7 +169,7 @@ describe("client against the echo server", () => {
   });
 
   after(() => {
-    httpServer.close();
+    stop(httpServer);
   });
 
   test("echoes text, including emoji", async () => {
@@ -184,8 +223,9 @@ describe("client handshake", () => {
     await assert.rejects(connect(`ws://127.0.0.1:${port}/`), /ECONNREFUSED/);
   });
 
-  test("a wrong Sec-WebSocket-Accept emits connectionFailed and drops the connection", async () => {
+  test("a wrong Sec-WebSocket-Accept emits connectionFailed and drops the connection", async (t) => {
     const fake = await fakeServer(
+      t,
       () =>
         "HTTP/1.1 101 Switching Protocols\r\n" +
         "Upgrade: websocket\r\n" +
@@ -199,20 +239,19 @@ describe("client handshake", () => {
     const [socket] = fake.sockets;
     assert.ok(socket);
     if (!socket.readableEnded) await once(socket, "end");
-    fake.server.close();
   });
 
-  test("a response other than 101 emits connectionFailed", async () => {
+  test("a response other than 101 emits connectionFailed", async (t) => {
     const fake = await fakeServer(
+      t,
       () => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
     );
 
     await assert.rejects(connect(fake.url), /status 404/);
-    fake.server.close();
   });
 
-  test("accepts Upgrade and Connection values in any case and reads a frame sent with the 101", async () => {
-    const fake = await fakeServer((key) =>
+  test("accepts Upgrade and Connection values in any case and reads a frame sent with the 101", async (t) => {
+    const fake = await fakeServer(t, (key) =>
       Buffer.concat([
         Buffer.from(
           "HTTP/1.1 101 Switching Protocols\r\n" +
@@ -232,12 +271,11 @@ describe("client handshake", () => {
       payload: "hi",
     });
     end(connection);
-    fake.server.close();
   });
 
-  test("sends the path, query and Host with a non-default port", async () => {
+  test("sends the path, query and Host with a non-default port", async (t) => {
     let request = "";
-    const fake = await fakeServer(() => "HTTP/1.1 400 Bad Request\r\n\r\n");
+    const fake = await fakeServer(t, () => "HTTP/1.1 400 Bad Request\r\n\r\n");
     fake.server.on("connection", (socket: net.Socket) =>
       socket.on("data", (data) => (request += data.toString("latin1"))),
     );
@@ -247,7 +285,6 @@ describe("client handshake", () => {
     assert.match(request, /^GET \/chat\?room=1 HTTP\/1\.1\r\n/);
     assert.match(request, new RegExp(`\r\nhost: 127.0.0.1:${port}\r\n`, "i"));
     assert.match(request, /\r\nsec-websocket-version: 13\r\n/i);
-    fake.server.close();
   });
 
   test("rejects schemes other than ws: and wss:", () => {
@@ -279,7 +316,7 @@ describe("client over wss:// against the echo server", () => {
   });
 
   after(() => {
-    httpsServer.close();
+    stop(httpsServer);
   });
 
   test("echoes text, including emoji", async () => {
@@ -317,6 +354,39 @@ describe("client over wss:// against the echo server", () => {
     end(connection);
   });
 
+  test("checks the certificate against servername when it is set", async () => {
+    // the certificate is valid for localhost, so this passes
+    const connection = await connect(url, {
+      tls: { ca: cert, servername: "localhost" },
+    });
+    end(connection);
+
+    await assert.rejects(
+      connect(url, { tls: { ca: cert, servername: "wrong.example" } }),
+      /Request failed: .*does not match certificate's altnames/,
+    );
+  });
+
+  test("TLS options can't change where the client connects or what it sends", async () => {
+    // none of these are allowed by the type; this checks the client also
+    // ignores them when they get through anyway
+    const tlsOptions = {
+      ca: cert,
+      host: "203.0.113.1",
+      hostname: "203.0.113.1",
+      port: 1,
+      path: "/elsewhere",
+      socketPath: "/nonexistent.sock",
+      headers: { upgrade: "nothing" },
+    } as unknown as WebSocketClientOptions["tls"];
+
+    const connection = await connect(url, { tls: tlsOptions });
+    const reply = nextMessage(connection);
+    connection.send("text", "still here");
+    assert.deepEqual(await reply, { type: "text", payload: "still here" });
+    end(connection);
+  });
+
   test("wss://host/ with no port uses 443 and leaves the port out of Host", async (t) => {
     // nothing listens on 443 here, so send the request on to the test server
     // and keep the options the client asked for
@@ -335,8 +405,9 @@ describe("client over wss:// against the echo server", () => {
     end(connection);
   });
 
-  test("reads a frame sent in the same TLS record as the 101", async () => {
+  test("reads a frame sent in the same TLS record as the 101", async (t) => {
     const fake = await fakeServer(
+      t,
       (key) =>
         Buffer.concat([
           Buffer.from(
@@ -358,6 +429,5 @@ describe("client over wss:// against the echo server", () => {
       payload: "hi",
     });
     end(connection);
-    fake.server.close();
   });
 });
