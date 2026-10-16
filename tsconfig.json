@@ -5,12 +5,13 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleDetection": "force",
-    "jsx": "react-jsx",
     "allowJs": true,
+    "types": ["node"],
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
     "noEmit": true,
 
     "strict": true,
@@ -21,8 +22,5 @@
     "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": true
   },
-  "include": [
-    "**/*.ts",
-    "**/*.tsx",
-  ]
+  "include": ["**/*.ts", "**/*.tsx"]
 }

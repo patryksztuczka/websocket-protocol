@@ -179,7 +179,7 @@ export class WebSocketFrame {
     return this.textPayload;
   }
 
-  public setTextPayload(message: string) {
+  public setTextPayload(message: string | Buffer) {
     const payload = Buffer.from(message);
     this.payloadLength = payload.length;
     this.textPayload = payload;
