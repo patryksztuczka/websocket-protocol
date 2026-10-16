@@ -5,7 +5,18 @@ import https from "node:https";
 import type { Socket } from "node:net";
 import type { ConnectionOptions } from "node:tls";
 
-import { WebSocketConnection } from "./web-socket-connection.ts";
+import {
+  PerMessageDeflate,
+  acceptPerMessageDeflateResponse,
+  formatPerMessageDeflateOffer,
+  resolvePerMessageDeflateOptions,
+  type PerMessageDeflateParams,
+  type ResolvedPerMessageDeflateOptions,
+} from "./permessage-deflate.ts";
+import {
+  WebSocketConnection,
+  type WebSocketConnectionOptions,
+} from "./web-socket-connection.ts";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -19,7 +30,13 @@ export type WebSocketClientTlsOptions = Omit<
   "host" | "port" | "path" | "socket" | "timeout"
 >;
 
-export interface WebSocketClientOptions {
+/**
+ * Options for `connect()`: TLS for `wss:` addresses, and the same connection
+ * settings as the server (`maxMessageSize`, `closeTimeout` and
+ * `perMessageDeflate`). With `perMessageDeflate` the client offers
+ * compression in its handshake and uses it if the server agrees.
+ */
+export interface WebSocketClientOptions extends WebSocketConnectionOptions {
   /** Used for `wss:` addresses only, for example `{ ca }` to trust a self-signed certificate. */
   tls?: WebSocketClientTlsOptions;
 }
@@ -32,6 +49,10 @@ export class WebSocketClient extends EventEmitter {
   private target: URL | null = null;
   // set once "connect" or "connectionFailed" has been emitted, so only one of them is
   private settled = false;
+  // the options of the connection being opened
+  private connectionOptions: WebSocketConnectionOptions = {};
+  // the compression settings to offer, or undefined to offer none
+  private deflateOptions: ResolvedPerMessageDeflateOptions | undefined;
 
   constructor() {
     super();
@@ -42,10 +63,14 @@ export class WebSocketClient extends EventEmitter {
    * address. Emits "connect" with a `WebSocketConnection`, which starts reading
    * messages by itself right after, or "connectionFailed" with the reason.
    * Throws for an invalid address or invalid TLS options, such as a `cert`
-   * that can't be read or a `servername` that is an IP address.
+   * that can't be read or a `servername` that is an IP address, and throws a
+   * RangeError for invalid `perMessageDeflate` settings.
    */
   public connect(url: string, options: WebSocketClientOptions = {}) {
     const target = new URL(url);
+    const deflateOptions = resolvePerMessageDeflateOptions(
+      options.perMessageDeflate,
+    );
 
     if (target.protocol !== "ws:" && target.protocol !== "wss:") {
       throw new Error(
@@ -61,6 +86,9 @@ export class WebSocketClient extends EventEmitter {
     this.settled = false;
     this.socket = null;
     this.target = target;
+    const { tls, ...connectionOptions } = options;
+    this.connectionOptions = connectionOptions;
+    this.deflateOptions = deflateOptions;
     // a fresh random 16-byte key for every handshake (RFC 6455 section 4.1)
     this.websocketKey = randomBytes(16).toString("base64");
 
@@ -84,6 +112,11 @@ export class WebSocketClient extends EventEmitter {
         connection: "Upgrade",
         "sec-websocket-key": this.websocketKey,
         "sec-websocket-version": "13",
+        // the compression offer (RFC 7692 section 5)
+        ...(deflateOptions && {
+          "sec-websocket-extensions":
+            formatPerMessageDeflateOffer(deflateOptions),
+        }),
       },
     };
 
@@ -95,7 +128,7 @@ export class WebSocketClient extends EventEmitter {
     // while invalid options such as a bad `cert` make https.request throw here
     this.req = secure
       ? https.request({
-          ...options.tls,
+          ...tls,
           ...requestOptions,
           socketPath: undefined,
         })
@@ -171,14 +204,38 @@ export class WebSocketClient extends EventEmitter {
       return;
     }
 
-    // the client asks for no extensions and no subprotocol, so the server must not pick any
-    if (response.headers["sec-websocket-extensions"] !== undefined) {
-      this.failConnection(
-        "Server chose an extension the client did not ask for",
+    // the only extension the client can offer is permessage-deflate, so the
+    // server may pick nothing else, and nothing at all when it wasn't offered
+    // (RFC 6455 section 4.1, RFC 7692 section 5)
+    const extensions = response.headers["sec-websocket-extensions"];
+    let compression: PerMessageDeflate | undefined;
+    if (extensions !== undefined) {
+      if (!this.deflateOptions) {
+        this.failConnection(
+          "Server chose an extension the client did not ask for",
+        );
+        return;
+      }
+      let params: PerMessageDeflateParams;
+      try {
+        params = acceptPerMessageDeflateResponse(
+          extensions,
+          this.deflateOptions,
+        );
+      } catch (error) {
+        this.failConnection(
+          error instanceof Error ? error.message : String(error),
+        );
+        return;
+      }
+      compression = new PerMessageDeflate(
+        params,
+        "client",
+        this.deflateOptions.threshold,
       );
-      return;
     }
 
+    // the client asks for no subprotocol, so the server must not pick one
     if (response.headers["sec-websocket-protocol"] !== undefined) {
       this.failConnection(
         "Server chose a subprotocol the client did not ask for",
@@ -186,7 +243,7 @@ export class WebSocketClient extends EventEmitter {
       return;
     }
 
-    this.succeedHandshake(response, head);
+    this.succeedHandshake(response, head, compression);
   }
 
   private failConnection(reason: string) {
@@ -199,19 +256,24 @@ export class WebSocketClient extends EventEmitter {
     this.emit("connectionFailed", reason);
   }
 
-  private succeedHandshake(response: IncomingMessage, head: Buffer) {
+  private succeedHandshake(
+    response: IncomingMessage,
+    head: Buffer,
+    compression: PerMessageDeflate | undefined,
+  ) {
     if (this.settled || !this.socket || !this.target) return;
     this.settled = true;
 
     const connection = new WebSocketConnection(
       this.socket,
       "client",
-      {},
+      this.connectionOptions,
       {
         path: this.target.pathname,
         query: new URLSearchParams(this.target.search),
         headers: response.headers,
       },
+      compression,
     );
 
     // frames the server sent right after its answer can arrive in the same

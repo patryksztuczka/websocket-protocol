@@ -9,7 +9,9 @@ import { describe, test } from "node:test";
 import {
   MessageTooBigError,
   PerMessageDeflate,
+  acceptPerMessageDeflateResponse,
   formatPerMessageDeflate,
+  formatPerMessageDeflateOffer,
   negotiatePerMessageDeflate,
   parseExtensions,
   resolvePerMessageDeflateOptions,
@@ -249,6 +251,63 @@ describe("negotiatePerMessageDeflate", () => {
   test("declines when nothing is offered", () => {
     assert.equal(answer(""), undefined);
     assert.equal(answer("x-webkit-deflate-frame"), undefined);
+  });
+});
+
+describe("the client's side of the negotiation", () => {
+  const options = (settings: PerMessageDeflateOptions = {}) =>
+    resolvePerMessageDeflateOptions(settings)!;
+
+  test("formatPerMessageDeflateOffer always says the client can be limited", () => {
+    assert.equal(
+      formatPerMessageDeflateOffer(options()),
+      "permessage-deflate; client_max_window_bits",
+    );
+  });
+
+  test("the offer the client makes is one the server accepts", () => {
+    const settings = {
+      serverNoContextTakeover: true,
+      clientNoContextTakeover: true,
+      serverMaxWindowBits: 10,
+      clientMaxWindowBits: 12,
+    };
+    assert.equal(
+      answer(formatPerMessageDeflateOffer(options(settings))),
+      "permessage-deflate; server_no_context_takeover; server_max_window_bits=10",
+    );
+  });
+
+  test("acceptPerMessageDeflateResponse returns what the client applies", () => {
+    assert.deepEqual(
+      acceptPerMessageDeflateResponse(
+        "permessage-deflate; server_max_window_bits=8; client_max_window_bits=10",
+        options({ clientMaxWindowBits: 9, clientNoContextTakeover: true }),
+      ),
+      {
+        serverNoContextTakeover: false,
+        // promised in the offer, so kept even though the answer left it out
+        clientNoContextTakeover: true,
+        serverMaxWindowBits: 8,
+        // the smaller of the answer and the client's own limit
+        clientMaxWindowBits: 9,
+      },
+    );
+    assert.deepEqual(
+      acceptPerMessageDeflateResponse("permessage-deflate", options()),
+      DEFAULT_PARAMS,
+    );
+  });
+
+  test("acceptPerMessageDeflateResponse throws on an answer the client must fail", () => {
+    assert.throws(
+      () =>
+        acceptPerMessageDeflateResponse(
+          "permessage-deflate; client_max_window_bits",
+          options(),
+        ),
+      /invalid value for client_max_window_bits/,
+    );
   });
 });
 

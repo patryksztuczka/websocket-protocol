@@ -121,6 +121,34 @@ client.on("connectionFailed", (reason) => console.log(reason));
 client.connect("wss://localhost:8443/", { tls: { ca: cert } });
 ```
 
+`connect(url, options)` also takes `maxMessageSize`, `closeTimeout` and `perMessageDeflate`, the same connection settings as the server.
+
+### Compression
+
+Both sides can compress messages with the `permessage-deflate` extension ([RFC 7692](https://datatracker.ietf.org/doc/html/rfc7692)). It is off by default, because every connection that uses it keeps zlib streams in memory while it is open. Turn it on with `perMessageDeflate`:
+
+```ts
+// the server accepts a client's offer, with the default settings
+const wsServer = new WebSocketServer(httpServer, { perMessageDeflate: true });
+
+// the client makes an offer; an object changes the settings
+client.connect("ws://127.0.0.1:8080/", {
+  perMessageDeflate: { threshold: 256, serverMaxWindowBits: 10 },
+});
+```
+
+Compression is only used when both sides agree to it in the handshake. Otherwise messages are sent uncompressed, as before. `send()` and the `message` events work the same either way.
+
+| Option                    | Default | What it does                                                                                                                                                                                                                                  |
+| ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `threshold`               | `1024`  | Messages smaller than this many bytes are sent uncompressed, since compressing short messages makes them bigger.                                                                                                                              |
+| `serverNoContextTakeover` | `false` | The server compresses every message on its own instead of referring back to earlier ones. It compresses less well and uses less memory. A client asks for it and fails the connection if the answer leaves it out.                            |
+| `clientNoContextTakeover` | `false` | The same for messages the client sends. A server asks the client for it; a client promises it. A client also follows it when the server's answer asks for it.                                                                                 |
+| `serverMaxWindowBits`     | unset   | The largest window (2^8 to 2^15 bytes, given as 8 to 15) the server compresses with. Unset means 15. A client asks for it and fails the connection if the answer leaves the parameter out or gives a larger value (RFC 7692 section 7.1.2.1). |
+| `clientMaxWindowBits`     | unset   | The same for the client. A server declines a client that can't be limited. A client also keeps to a smaller value in the server's answer.                                                                                                     |
+
+A compressed message is held to `maxMessageSize` once decompressed, so a small message that would expand to gigabytes closes the connection with 1009.
+
 ---
 
 ## To Do
@@ -139,11 +167,11 @@ client.connect("wss://localhost:8443/", { tls: { ca: cert } });
 - [x] **Connection Closure** — The closing handshake with status codes, `close(code, reason)` and a `close` event. Invalid close codes are rejected.
 - [x] **Client** — The client connects to `ws://` addresses, sends and receives messages, and reports a failed connection with `connectionFailed`.
 - [x] **Secure WebSockets (`wss://`)** — The client connects to `wss://` addresses, port 443 by default, and takes TLS options such as `ca`. The server works with an `https.Server`.
-- [x] **Client Compliance Testing** — Client tests with `node:test` cover the handshake, text and binary messages, long messages, the closing handshake, failed connections and `wss://`.
+- [x] **Client Compliance Testing** — Client tests with `node:test` cover the handshake, text and binary messages, long messages, the closing handshake, failed connections, `wss://` and compression.
+- [x] **Compression** — The server and the client support the `permessage-deflate` extension, including context takeover and window size limits. It is off by default; see [Compression](#compression).
 
 ### ⏳ Not Done / Planned
 
-- [ ] **Compression** — The `permessage-deflate` extension isn't implemented, so Autobahn sections 12 and 13 are not run. See [#42](https://github.com/patryksztuczka/websocket-protocol/issues/42).
 - [ ] **Router Implementation** — Design and implement a lightweight internal router to dispatch messages to appropriate handlers based on message type or path. This is an idea for later, see [#43](https://github.com/patryksztuczka/websocket-protocol/issues/43).
 
 See the [issues page](https://github.com/patryksztuczka/websocket-protocol/issues) for open bugs and planned work.
@@ -154,7 +182,7 @@ See the [issues page](https://github.com/patryksztuczka/websocket-protocol/issue
 
 This project uses the [Autobahn Test Suite](https://github.com/crossbario/autobahn-testsuite) to validate compliance with RFC 6455.
 
-The tests are designed to rigorously evaluate this implementation against a broad set of edge cases and protocol requirements. Sections 1 to 7 and 9 are run on every push and pull request. Sections 12 and 13 test compression, which isn't implemented, and section 10 is not enabled yet. `test/autobahn/config/fuzzingclient.json` sets which cases run.
+The tests are designed to rigorously evaluate this implementation against a broad set of edge cases and protocol requirements. Sections 1 to 7, 9, 12 and 13 are run on every push and pull request; 12 and 13 test compression, so the echo server turns it on. Section 10 is not enabled yet. `test/autobahn/config/fuzzingclient.json` sets which cases run.
 
 ### 🧪 Running Tests
 
