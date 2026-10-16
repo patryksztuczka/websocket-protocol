@@ -5,17 +5,36 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { createServer, type Server } from "node:http";
+import { readFileSync } from "node:fs";
+import { createServer, type OutgoingHttpHeaders, type Server } from "node:http";
+import https from "node:https";
 import net from "node:net";
 import { after, before, describe, test } from "node:test";
+import tls from "node:tls";
 
-import { WebSocketClient } from "../lib/web-socket-client.ts";
+import {
+  WebSocketClient,
+  type WebSocketClientOptions,
+} from "../lib/web-socket-client.ts";
 import type { WebSocketConnection } from "../lib/web-socket-connection.ts";
 import { WebSocketServer } from "../lib/web-socket-server.ts";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 type Message = { type: "text" | "binary"; payload: string | Buffer };
+
+// A self-signed certificate for localhost and 127.0.0.1 that expires in 2126,
+// made with:
+//   openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 36500 \
+//     -subj "/CN=localhost" \
+//     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+//     -keyout test/fixtures/localhost-key.pem -out test/fixtures/localhost-cert.pem
+const cert = readFileSync(
+  new URL("fixtures/localhost-cert.pem", import.meta.url),
+);
+const key = readFileSync(
+  new URL("fixtures/localhost-key.pem", import.meta.url),
+);
 
 /** Resolves with the port once the server listens on a free one. */
 async function listen(server: net.Server | Server): Promise<number> {
@@ -25,14 +44,17 @@ async function listen(server: net.Server | Server): Promise<number> {
 }
 
 /** Connects and resolves with the connection, or rejects with the failure reason. */
-function connect(url: string): Promise<WebSocketConnection> {
+function connect(
+  url: string,
+  options?: WebSocketClientOptions,
+): Promise<WebSocketConnection> {
   return new Promise((resolve, reject) => {
     const client = new WebSocketClient();
     client.on("connect", resolve);
     client.on("connectionFailed", (reason: string) =>
       reject(new Error(reason)),
     );
-    client.connect(url);
+    client.connect(url, options);
   });
 }
 
@@ -52,10 +74,14 @@ function end(connection: WebSocketConnection) {
 /**
  * A raw TCP server that reads the client's handshake request and answers with
  * whatever `respond` returns, so tests can send answers the real server never would.
+ * With `secure` it speaks TLS with the fixture certificate and gives a wss: address.
  */
-async function fakeServer(respond: (key: string) => string | Buffer) {
+async function fakeServer(
+  respond: (key: string) => string | Buffer,
+  { secure = false } = {},
+) {
   const sockets: net.Socket[] = [];
-  const server = net.createServer((socket) => {
+  const onConnection = (socket: net.Socket) => {
     sockets.push(socket);
     let request = "";
     socket.on("data", (data) => {
@@ -66,9 +92,24 @@ async function fakeServer(respond: (key: string) => string | Buffer) {
     });
     // the client may drop the connection at any point
     socket.on("error", () => {});
-  });
+  };
+  const server = secure
+    ? tls.createServer({ cert, key }, onConnection)
+    : net.createServer(onConnection);
   const port = await listen(server);
-  return { server, sockets, url: `ws://127.0.0.1:${port}/` };
+  const scheme = secure ? "wss" : "ws";
+  return { server, sockets, url: `${scheme}://127.0.0.1:${port}/` };
+}
+
+/** Answers with the same behaviour as test/scripts/server-test.ts. */
+function echo(connection: WebSocketConnection) {
+  connection.addSocketEventListeners();
+  connection.on("message", (message) =>
+    connection.send("text", message.payload),
+  );
+  connection.on("binaryMessage", (message) =>
+    connection.send("binary", message.payload),
+  );
 }
 
 function acceptKey(key: string) {
@@ -84,16 +125,7 @@ describe("client against the echo server", () => {
   before(async () => {
     httpServer = createServer();
     const wsServer = new WebSocketServer(httpServer);
-    // the same echo behaviour as test/scripts/server-test.ts
-    wsServer.on("connect", (connection: WebSocketConnection) => {
-      connection.addSocketEventListeners();
-      connection.on("message", (message) =>
-        connection.send("text", message.payload),
-      );
-      connection.on("binaryMessage", (message) =>
-        connection.send("binary", message.payload),
-      );
-    });
+    wsServer.on("connect", echo);
     url = `ws://127.0.0.1:${await listen(httpServer)}/chat`;
   });
 
@@ -218,9 +250,114 @@ describe("client handshake", () => {
     fake.server.close();
   });
 
-  test("rejects wss: and other schemes", () => {
+  test("rejects schemes other than ws: and wss:", () => {
     const client = new WebSocketClient();
-    assert.throws(() => client.connect("wss://127.0.0.1/"), /not supported/);
-    assert.throws(() => client.connect("http://127.0.0.1/"), /expected ws:/);
+    assert.throws(
+      () => client.connect("http://127.0.0.1/"),
+      /expected ws: or wss:/,
+    );
+    assert.throws(
+      () => client.connect("https://127.0.0.1/"),
+      /expected ws: or wss:/,
+    );
+  });
+});
+
+describe("client over wss:// against the echo server", () => {
+  let httpsServer: https.Server;
+  let port: number;
+  let url: string;
+  // trust the self-signed fixture certificate
+  const options: WebSocketClientOptions = { tls: { ca: cert } };
+
+  before(async () => {
+    httpsServer = https.createServer({ cert, key });
+    const wsServer = new WebSocketServer(httpsServer);
+    wsServer.on("connect", echo);
+    port = await listen(httpsServer);
+    url = `wss://127.0.0.1:${port}/chat`;
+  });
+
+  after(() => {
+    httpsServer.close();
+  });
+
+  test("echoes text, including emoji", async () => {
+    const connection = await connect(url, options);
+    const reply = nextMessage(connection);
+    connection.send("text", "Hello world 👋 zażółć");
+    assert.deepEqual(await reply, {
+      type: "text",
+      payload: "Hello world 👋 zażółć",
+    });
+    end(connection);
+  });
+
+  test("echoes binary", async () => {
+    const connection = await connect(url, options);
+    const reply = nextMessage(connection);
+    const data = Buffer.from([0x00, 0x01, 0x80, 0xfe, 0xff]);
+    connection.send("binary", data);
+    assert.deepEqual(await reply, { type: "binary", payload: data });
+    end(connection);
+  });
+
+  test("an untrusted certificate emits connectionFailed with the reason", async () => {
+    // without the ca option the self-signed certificate is not trusted
+    await assert.rejects(connect(url), /Request failed: .*certificate/);
+  });
+
+  test("passes TLS options through, such as rejectUnauthorized", async () => {
+    const connection = await connect(url, {
+      tls: { rejectUnauthorized: false },
+    });
+    const reply = nextMessage(connection);
+    connection.send("text", "unchecked");
+    assert.deepEqual(await reply, { type: "text", payload: "unchecked" });
+    end(connection);
+  });
+
+  test("wss://host/ with no port uses 443 and leaves the port out of Host", async (t) => {
+    // nothing listens on 443 here, so send the request on to the test server
+    // and keep the options the client asked for
+    const realRequest = https.request;
+    let asked: https.RequestOptions | undefined;
+    t.mock.method(https, "request", (requestOptions: https.RequestOptions) => {
+      asked = requestOptions;
+      return realRequest({ ...requestOptions, hostname: "127.0.0.1", port });
+    });
+
+    const connection = await connect("wss://localhost/chat", options);
+    assert.equal(asked?.port, 443);
+    assert.equal(asked?.hostname, "localhost");
+    const headers = asked?.headers as OutgoingHttpHeaders | undefined;
+    assert.equal(headers?.["host"], "localhost");
+    end(connection);
+  });
+
+  test("reads a frame sent in the same TLS record as the 101", async () => {
+    const fake = await fakeServer(
+      (key) =>
+        Buffer.concat([
+          Buffer.from(
+            "HTTP/1.1 101 Switching Protocols\r\n" +
+              "Upgrade: websocket\r\n" +
+              "Connection: Upgrade\r\n" +
+              `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n` +
+              "\r\n",
+          ),
+          // an unmasked text frame "hi" in the same write as the answer
+          Buffer.from([0x81, 0x02, 0x68, 0x69]),
+        ]),
+      { secure: true },
+    );
+
+    const connection = await connect(fake.url, options);
+    assert.deepEqual(await nextMessage(connection), {
+      type: "text",
+      payload: "hi",
+    });
+    end(connection);
+    fake.server.close();
   });
 });
