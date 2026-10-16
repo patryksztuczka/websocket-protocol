@@ -3,7 +3,10 @@ import EventEmitter from "node:events";
 import type { IncomingMessage } from "node:http";
 import type { Socket } from "node:net";
 
-import { WebSocketConnection } from "./web-socket-connection.ts";
+import {
+  WebSocketConnection,
+  type WebSocketConnectionOptions,
+} from "./web-socket-connection.ts";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -11,11 +14,17 @@ export class WebSocketRequest extends EventEmitter {
   private httpRequest: IncomingMessage;
   private socket: Socket;
   private websocketKey: string | undefined;
+  private connectionOptions: WebSocketConnectionOptions;
 
-  constructor(request: IncomingMessage, socket: Socket) {
+  constructor(
+    request: IncomingMessage,
+    socket: Socket,
+    connectionOptions: WebSocketConnectionOptions = {},
+  ) {
     super();
     this.httpRequest = request;
     this.socket = socket;
+    this.connectionOptions = connectionOptions;
   }
 
   public readRequest() {
@@ -69,7 +78,11 @@ export class WebSocketRequest extends EventEmitter {
       "ascii",
     );
 
-    const connection = new WebSocketConnection(this.socket, "server");
+    const connection = new WebSocketConnection(
+      this.socket,
+      "server",
+      this.connectionOptions,
+    );
 
     return connection;
   }
