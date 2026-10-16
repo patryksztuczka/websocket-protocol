@@ -8,6 +8,13 @@ import {
 import type { Socket } from "node:net";
 
 import {
+  formatPerMessageDeflate,
+  negotiatePerMessageDeflate,
+  parseExtensions,
+  resolvePerMessageDeflateOptions,
+  type PerMessageDeflateParams,
+} from "./permessage-deflate.ts";
+import {
   WebSocketConnection,
   type WebSocketConnectionOptions,
 } from "./web-socket-connection.ts";
@@ -52,6 +59,8 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
   private websocketKey: string | undefined;
   private connectionOptions: WebSocketConnectionOptions;
   private isAnswered = false;
+  // the agreed permessage-deflate parameters, if an offer was accepted
+  private perMessageDeflate: PerMessageDeflateParams | undefined;
 
   constructor(
     request: IncomingMessage,
@@ -139,8 +148,35 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       throw new HandshakeError("Unsupported Sec-WebSocket-Version", 426);
     }
 
+    const perMessageDeflate = this.negotiateExtensions();
+
     // Only remember the key once every check has passed.
     this.websocketKey = key;
+    this.perMessageDeflate = perMessageDeflate;
+  }
+
+  /**
+   * Picks the permessage-deflate offer to accept from Sec-WebSocket-Extensions
+   * (RFC 7692 section 5), when compression is turned on. Other extensions
+   * aren't supported and are left out of the answer, which declines them
+   * (RFC 6455 section 9.1).
+   */
+  private negotiateExtensions(): PerMessageDeflateParams | undefined {
+    const options = resolvePerMessageDeflateOptions(
+      this.connectionOptions.perMessageDeflate,
+    );
+    const header = this.httpRequest.headers["sec-websocket-extensions"];
+    if (!options || header === undefined) return undefined;
+
+    try {
+      return negotiatePerMessageDeflate(parseExtensions(header), options);
+    } catch (error) {
+      throw new HandshakeError(
+        error instanceof Error
+          ? error.message
+          : "Invalid Sec-WebSocket-Extensions header",
+      );
+    }
   }
 
   /**
@@ -156,11 +192,17 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
     }
     this.markAnswered();
 
+    // the accepted offer's agreed parameters (RFC 7692 section 5)
+    const extensions = this.perMessageDeflate
+      ? `Sec-WebSocket-Extensions: ${formatPerMessageDeflate(this.perMessageDeflate)}\r\n`
+      : "";
+
     this.socket.write(
       `HTTP/1.1 101 Switching Protocols\r\n` +
         `Upgrade: websocket\r\n` +
         `Connection: Upgrade\r\n` +
         `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(this.websocketKey)}\r\n` +
+        extensions +
         `\r\n`,
       "ascii",
     );
@@ -170,6 +212,7 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       "server",
       this.connectionOptions,
       { path: this.path, query: this.query, headers: this.headers },
+      this.perMessageDeflate,
     );
 
     this.emit("accept", connection);

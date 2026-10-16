@@ -2,6 +2,7 @@ import EventEmitter from "node:events";
 import type { IncomingMessage, Server } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 
+import { resolvePerMessageDeflateOptions } from "./permessage-deflate.ts";
 import { WebSocketRequest } from "./web-socket-request.ts";
 import type {
   WebSocketConnection,
@@ -26,6 +27,8 @@ export class WebSocketServer extends EventEmitter {
     connectionOptions: WebSocketConnectionOptions = {},
   ) {
     super();
+    // throws a RangeError right away for invalid compression settings
+    resolvePerMessageDeflateOptions(connectionOptions.perMessageDeflate);
     this.httpServer = httpServer;
     this.connectionOptions = connectionOptions;
 
