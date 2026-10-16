@@ -1,5 +1,6 @@
 import EventEmitter from "node:events";
 import type { IncomingMessage, Server } from "node:http";
+import type { Server as HttpsServer } from "node:https";
 
 import { WebSocketRequest } from "./web-socket-request.ts";
 import type {
@@ -9,12 +10,13 @@ import type {
 import type { Socket } from "node:net";
 
 export class WebSocketServer extends EventEmitter {
-  private httpServer: Server;
+  private httpServer: Server | HttpsServer;
   private connections: WebSocketConnection[] = [];
   private connectionOptions: WebSocketConnectionOptions;
 
+  // an https.Server emits the same "upgrade" event, with a TLSSocket, which is a Socket
   constructor(
-    httpServer: Server,
+    httpServer: Server | HttpsServer,
     connectionOptions: WebSocketConnectionOptions = {},
   ) {
     super();

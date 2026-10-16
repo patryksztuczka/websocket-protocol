@@ -71,6 +71,42 @@ httpServer.listen(8080);
 
 The client is `WebSocketClient`. `client.connect("ws://127.0.0.1:8080/")` emits `connect` with a connection that has the same events and methods, or `connectionFailed` with the reason. [`test/scripts/client-test.ts`](test/scripts/client-test.ts) shows it in use.
 
+### Secure WebSockets (`wss://`)
+
+For `wss://`, attach the server to a `node:https` server instead. The client connects to `wss://` addresses on port 443 by default, and the `tls` option is passed on to `https.request`, for example `ca` to trust a self-signed certificate. A TLS error while connecting, such as an untrusted certificate or one that doesn't match `servername`, ends in `connectionFailed`. Invalid TLS options, such as a `cert` or `key` that can't be read or a `servername` that is an IP address, make `connect()` throw instead.
+
+```ts
+import { readFileSync } from "node:fs";
+import { createServer } from "node:https";
+
+import { WebSocketClient } from "./lib/web-socket-client.ts";
+import { WebSocketServer } from "./lib/web-socket-server.ts";
+
+const cert = readFileSync("test/fixtures/localhost-cert.pem");
+const key = readFileSync("test/fixtures/localhost-key.pem");
+
+const httpsServer = createServer({ cert, key });
+const wsServer = new WebSocketServer(httpsServer);
+wsServer.on("connect", (connection) => {
+  connection.addSocketEventListeners();
+  connection.on("message", (message) =>
+    connection.send("text", message.payload),
+  );
+});
+httpsServer.listen(8443);
+
+const client = new WebSocketClient();
+client.on("connect", (connection) => {
+  connection.on("message", (message) => {
+    console.log(message.payload); // "Hello over TLS"
+    connection.close();
+  });
+  connection.send("text", "Hello over TLS");
+});
+client.on("connectionFailed", (reason) => console.log(reason));
+client.connect("wss://localhost:8443/", { tls: { ca: cert } });
+```
+
 ---
 
 ## To Do
@@ -88,13 +124,13 @@ The client is `WebSocketClient`. `client.connect("ws://127.0.0.1:8080/")` emits 
 - [x] **Opcode Handling** — Properly differentiate and handle control and non-control opcodes. Reserved opcodes and reserved bits close the connection with 1002.
 - [x] **Connection Closure** — The closing handshake with status codes, `close(code, reason)` and a `close` event. Invalid close codes are rejected.
 - [x] **Client** — The client connects to `ws://` addresses, sends and receives messages, and reports a failed connection with `connectionFailed`.
-- [x] **Client Compliance Testing** — Client tests with `node:test` cover the handshake, text and binary messages, long messages, the closing handshake and failed connections.
+- [x] **Secure WebSockets (`wss://`)** — The client connects to `wss://` addresses, port 443 by default, and takes TLS options such as `ca`. The server works with an `https.Server`.
+- [x] **Client Compliance Testing** — Client tests with `node:test` cover the handshake, text and binary messages, long messages, the closing handshake, failed connections and `wss://`.
 
 ### ⏳ Not Done / Planned
 
-- [ ] **Compression** — The `permessage-deflate` extension isn't implemented, so Autobahn sections 12 and 13 are not run.
-- [ ] **Secure WebSockets (`wss://`)** — The client only connects to `ws://` addresses.
-- [ ] **Router Implementation** — Design and implement a lightweight internal router to dispatch messages to appropriate handlers based on message type or path. This is an idea for later and has no issue yet.
+- [ ] **Compression** — The `permessage-deflate` extension isn't implemented, so Autobahn sections 12 and 13 are not run. See [#42](https://github.com/patryksztuczka/websocket-protocol/issues/42).
+- [ ] **Router Implementation** — Design and implement a lightweight internal router to dispatch messages to appropriate handlers based on message type or path. This is an idea for later, see [#43](https://github.com/patryksztuczka/websocket-protocol/issues/43).
 
 See the [issues page](https://github.com/patryksztuczka/websocket-protocol/issues) for open bugs and planned work.
 
