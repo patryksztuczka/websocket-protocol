@@ -2,6 +2,10 @@ import EventEmitter from "node:events";
 import type { IncomingMessage, Server } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 
+import {
+  resolvePerMessageDeflateOptions,
+  type ResolvedPerMessageDeflateOptions,
+} from "./permessage-deflate.ts";
 import { WebSocketRequest } from "./web-socket-request.ts";
 import type {
   WebSocketConnection,
@@ -19,6 +23,8 @@ export class WebSocketServer extends EventEmitter {
   private httpServer: Server | HttpsServer;
   private connections: WebSocketConnection[] = [];
   private connectionOptions: WebSocketConnectionOptions;
+  // the compression settings, or undefined when compression is off
+  private deflateOptions: ResolvedPerMessageDeflateOptions | undefined;
 
   // an https.Server emits the same "upgrade" event, with a TLSSocket, which is a Socket
   constructor(
@@ -28,6 +34,10 @@ export class WebSocketServer extends EventEmitter {
     super();
     this.httpServer = httpServer;
     this.connectionOptions = connectionOptions;
+    // resolved once; throws a RangeError right away for invalid settings
+    this.deflateOptions = resolvePerMessageDeflateOptions(
+      connectionOptions.perMessageDeflate,
+    );
 
     this.httpServer.on("upgrade", (req, socket) =>
       this.handleUpgradeRequest(req, socket as Socket),
@@ -35,7 +45,12 @@ export class WebSocketServer extends EventEmitter {
   }
 
   private handleUpgradeRequest(req: IncomingMessage, socket: Socket) {
-    const wsRequest = new WebSocketRequest(req, socket, this.connectionOptions);
+    const wsRequest = new WebSocketRequest(
+      req,
+      socket,
+      this.connectionOptions,
+      this.deflateOptions,
+    );
 
     try {
       wsRequest.readRequest();

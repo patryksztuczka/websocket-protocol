@@ -46,11 +46,14 @@ export class WebSocketFrame {
    * reading frames from a client, false when reading frames from a server
    * (RFC 6455 section 5.1). A data frame whose payload is longer than
    * `maxPayloadLength` fails with "MESSAGE_TOO_BIG" before its payload is read.
+   * `compressionAgreed` says whether permessage-deflate was negotiated, which
+   * allows RSV1 on the first frame of a text or binary message.
    */
   public addData(
     data: ReceiveBuffer,
     expectMasked: boolean,
     maxPayloadLength: number,
+    compressionAgreed = false,
   ): boolean {
     if (this.parseState === "DECODE_HEADER") {
       if (data.length < 2) return false;
@@ -60,7 +63,14 @@ export class WebSocketFrame {
       this.rsv = (firstByte & 0b01110000) >> 4;
       this.opcode = firstByte & 0b00001111;
 
-      if (this.rsv !== 0) {
+      // RSV2 and RSV3 have no meaning without an extension that defines them
+      // (RFC 6455 section 5.2). RSV1 marks a compressed message once
+      // permessage-deflate was agreed, and only on the first frame of a text
+      // or binary message, never on a continuation or control frame (RFC 7692
+      // section 6.1).
+      const rsv1Allowed =
+        compressionAgreed && (this.opcode === 0x1 || this.opcode === 0x2);
+      if ((this.rsv & 0b011) !== 0 || (this.getRsv1() && !rsv1Allowed)) {
         this.error = "RESERVED_BITS_USED";
         return false;
       }
@@ -192,6 +202,11 @@ export class WebSocketFrame {
   public setFin(fin: number) {
     this.fin = fin;
     return this;
+  }
+
+  /** 1 when RSV1, the "Per-Message Compressed" bit, is set (RFC 7692 section 6). */
+  public getRsv1() {
+    return (this.rsv & 0b100) >> 2;
   }
 
   public setRsv(rsv: number) {
