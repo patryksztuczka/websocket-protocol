@@ -1,7 +1,6 @@
 import { createServer } from "node:http";
 
 import { WebSocketServer } from "../../lib/web-socket-server.ts";
-import type { WebSocketConnection } from "../../lib/web-socket-connection.ts";
 
 // CI sets HOST=0.0.0.0 so the Autobahn container can reach the server on Linux.
 const host = process.env["HOST"] ?? "127.0.0.1";
@@ -14,9 +13,10 @@ httpServer.listen(8080, host, () =>
 
 const wsServer = new WebSocketServer(httpServer);
 
-wsServer.on("connect", (connection: WebSocketConnection) => {
+// the server and connection events are typed, so the listeners know their
+// arguments: a string payload for "message", a Buffer for "binaryMessage"
+wsServer.on("connect", (connection) => {
   connection.addSocketEventListeners();
-  // TODO: improve type-safety for available events
   connection.on("message", (message) => {
     connection.send("text", message.payload);
   });
@@ -25,7 +25,7 @@ wsServer.on("connect", (connection: WebSocketConnection) => {
     connection.send("binary", message.payload);
   });
 
-  connection.on("close", (code: number, reason: string) => {
+  connection.on("close", (code, reason) => {
     console.log(`Connection closed with ${code} ${reason}`);
   });
 });

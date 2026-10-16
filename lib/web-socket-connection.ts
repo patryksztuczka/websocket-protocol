@@ -36,6 +36,28 @@ export interface WebSocketHandshakeInfo {
   headers: IncomingHttpHeaders;
 }
 
+/** A text message. The payload has been checked to be valid UTF-8. */
+export interface TextMessage {
+  type: "text";
+  payload: string;
+}
+
+/** A binary message. */
+export interface BinaryMessage {
+  type: "binary";
+  payload: Buffer;
+}
+
+/** The events a connection emits and the arguments their listeners get. */
+export interface WebSocketConnectionEvents {
+  message: [message: TextMessage];
+  binaryMessage: [message: BinaryMessage];
+  /** A pong frame's payload (RFC 6455 section 5.5.3). */
+  pong: [payload: Buffer];
+  /** The TCP connection has closed; see handleSocketClose(). */
+  close: [code: number, reason: string];
+}
+
 /** 64 MiB */
 export const DEFAULT_MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
 
@@ -63,7 +85,7 @@ const isValidCloseCode = (code: number) =>
   (code >= 1007 && code <= 1011) ||
   (code >= 3000 && code <= 4999);
 
-export class WebSocketConnection extends EventEmitter {
+export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents> {
   /** The path the connection was opened on, without the query, e.g. "/rooms/42". */
   public readonly path: string;
   /** The query of the address the connection was opened on. */

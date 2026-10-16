@@ -57,6 +57,14 @@ export function connect(url: string): Promise<WebSocketConnection> {
   });
 }
 
+/** Resolves with the payload of the next text message on the connection. */
+export async function nextText(
+  connection: WebSocketConnection,
+): Promise<string> {
+  const [message] = await once(connection, "message");
+  return message.payload;
+}
+
 /**
  * Sends a valid opening handshake with plain `node:http` and resolves with the
  * answer when it isn't a 101, so tests can read the status, headers and body
