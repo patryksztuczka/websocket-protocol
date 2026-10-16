@@ -8,11 +8,13 @@ import {
 import type { Socket } from "node:net";
 
 import {
+  PerMessageDeflate,
   formatPerMessageDeflate,
   negotiatePerMessageDeflate,
   parseExtensions,
   resolvePerMessageDeflateOptions,
   type PerMessageDeflateParams,
+  type ResolvedPerMessageDeflateOptions,
 } from "./permessage-deflate.ts";
 import {
   WebSocketConnection,
@@ -59,18 +61,28 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
   private websocketKey: string | undefined;
   private connectionOptions: WebSocketConnectionOptions;
   private isAnswered = false;
+  // the server's compression settings, or undefined when compression is off
+  private deflateOptions: ResolvedPerMessageDeflateOptions | undefined;
   // the agreed permessage-deflate parameters, if an offer was accepted
-  private perMessageDeflate: PerMessageDeflateParams | undefined;
+  private deflateParams: PerMessageDeflateParams | undefined;
 
+  /**
+   * `deflateOptions` is `connectionOptions.perMessageDeflate` resolved; the
+   * server passes it in so it is only resolved once.
+   */
   constructor(
     request: IncomingMessage,
     socket: Socket,
     connectionOptions: WebSocketConnectionOptions = {},
+    deflateOptions = resolvePerMessageDeflateOptions(
+      connectionOptions.perMessageDeflate,
+    ),
   ) {
     super();
     this.httpRequest = request;
     this.socket = socket;
     this.connectionOptions = connectionOptions;
+    this.deflateOptions = deflateOptions;
 
     // split the request-target by hand: URL would read "//host/path" as a
     // host and change the path the client sent
@@ -148,11 +160,11 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       throw new HandshakeError("Unsupported Sec-WebSocket-Version", 426);
     }
 
-    const perMessageDeflate = this.negotiateExtensions();
+    const deflateParams = this.negotiateExtensions();
 
     // Only remember the key once every check has passed.
     this.websocketKey = key;
-    this.perMessageDeflate = perMessageDeflate;
+    this.deflateParams = deflateParams;
   }
 
   /**
@@ -162,14 +174,14 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
    * (RFC 6455 section 9.1).
    */
   private negotiateExtensions(): PerMessageDeflateParams | undefined {
-    const options = resolvePerMessageDeflateOptions(
-      this.connectionOptions.perMessageDeflate,
-    );
     const header = this.httpRequest.headers["sec-websocket-extensions"];
-    if (!options || header === undefined) return undefined;
+    if (!this.deflateOptions || header === undefined) return undefined;
 
     try {
-      return negotiatePerMessageDeflate(parseExtensions(header), options);
+      return negotiatePerMessageDeflate(
+        parseExtensions(header),
+        this.deflateOptions,
+      );
     } catch (error) {
       throw new HandshakeError(
         error instanceof Error
@@ -193,8 +205,8 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
     this.markAnswered();
 
     // the accepted offer's agreed parameters (RFC 7692 section 5)
-    const extensions = this.perMessageDeflate
-      ? `Sec-WebSocket-Extensions: ${formatPerMessageDeflate(this.perMessageDeflate)}\r\n`
+    const extensions = this.deflateParams
+      ? `Sec-WebSocket-Extensions: ${formatPerMessageDeflate(this.deflateParams)}\r\n`
       : "";
 
     this.socket.write(
@@ -207,12 +219,23 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       "ascii",
     );
 
+    // compresses and decompresses the connection's messages with the agreed
+    // parameters; an offer is only accepted when compression is on
+    const compression =
+      this.deflateParams && this.deflateOptions
+        ? new PerMessageDeflate(
+            this.deflateParams,
+            "server",
+            this.deflateOptions.threshold,
+          )
+        : undefined;
+
     const connection = new WebSocketConnection(
       this.socket,
       "server",
       this.connectionOptions,
       { path: this.path, query: this.query, headers: this.headers },
-      this.perMessageDeflate,
+      compression,
     );
 
     this.emit("accept", connection);

@@ -4,10 +4,8 @@ import type { Socket } from "node:net";
 
 import {
   MessageTooBigError,
-  PerMessageDeflate,
-  resolvePerMessageDeflateOptions,
+  type PerMessageDeflate,
   type PerMessageDeflateOptions,
-  type PerMessageDeflateParams,
 } from "./permessage-deflate.ts";
 import { ReceiveBuffer } from "./receive-buffer.ts";
 import { Utf8Decoder } from "./utf8-decoder.ts";
@@ -104,9 +102,7 @@ export class WebSocketConnection extends EventEmitter {
   // whether the message in progress had RSV1 set on its first frame
   private messageCompressed = false;
   // compresses and decompresses messages when permessage-deflate was agreed
-  private perMessageDeflate: PerMessageDeflate | undefined;
-  // messages smaller than this are sent uncompressed
-  private compressionThreshold = 0;
+  private compression: PerMessageDeflate | undefined;
   // set while a received message is being decompressed; no more frames are
   // read until it has been delivered, so messages keep their order
   private inflating = false;
@@ -129,8 +125,9 @@ export class WebSocketConnection extends EventEmitter {
   private listening = false;
 
   /**
-   * `perMessageDeflate` is the agreed permessage-deflate parameters from the
-   * opening handshake, or undefined when it wasn't agreed.
+   * `compression` is set up with the permessage-deflate parameters agreed in
+   * the opening handshake, or undefined when none were agreed. The
+   * connection closes it when the TCP connection closes.
    */
   constructor(
     socket: Socket,
@@ -141,7 +138,7 @@ export class WebSocketConnection extends EventEmitter {
       query: new URLSearchParams(),
       headers: {},
     },
-    perMessageDeflate?: PerMessageDeflateParams,
+    compression?: PerMessageDeflate,
   ) {
     super();
     this.path = handshake.path;
@@ -151,12 +148,7 @@ export class WebSocketConnection extends EventEmitter {
     this.role = role;
     this.maxMessageSize = options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE;
     this.closeTimeout = options.closeTimeout ?? DEFAULT_CLOSE_TIMEOUT;
-    if (perMessageDeflate) {
-      this.perMessageDeflate = new PerMessageDeflate(perMessageDeflate, role);
-      this.compressionThreshold = resolvePerMessageDeflateOptions(
-        options.perMessageDeflate || true,
-      )!.threshold;
-    }
+    this.compression = compression;
   }
 
   public get readyState(): WebSocketReadyState {
@@ -198,7 +190,7 @@ export class WebSocketConnection extends EventEmitter {
     clearTimeout(this.closeTimer);
     // free the zlib streams; a compression or decompression still running
     // is dropped
-    this.perMessageDeflate?.close();
+    this.compression?.close();
     this.emit("close", this.closeCode, this.closeReason);
   }
 
@@ -224,7 +216,7 @@ export class WebSocketConnection extends EventEmitter {
           this.received,
           this.role === "server",
           this.maxMessageSize - this.fragmentsLength,
-          this.perMessageDeflate !== undefined,
+          this.compression !== undefined,
         )
       ) {
         if (frame.error) {
@@ -321,25 +313,30 @@ export class WebSocketConnection extends EventEmitter {
     this.fragments = [];
     this.fragmentsLength = 0;
 
-    if (compressed) {
-      this.inflateMessage(opcode, fragments);
+    if (compressed && this.compression) {
+      this.inflateMessage(this.compression, opcode, fragments);
       return false;
     }
 
-    if (opcode === 0x1) {
-      this.emit("message", {
-        type: "text",
-        payload: this.textDecoder.end(),
-      });
-    } else {
-      this.emit("binaryMessage", {
-        type: "binary",
-        // a message sent in one frame needs no copy
-        payload:
-          fragments.length === 1 ? fragments[0] : Buffer.concat(fragments),
-      });
-    }
+    this.emitMessage(
+      opcode,
+      opcode === 0x1
+        ? this.textDecoder.end()
+        : // a message sent in one frame needs no copy
+          fragments.length === 1
+          ? fragments[0]!
+          : Buffer.concat(fragments),
+    );
     return true;
+  }
+
+  /** Emits a whole message: "message" with its text, or "binaryMessage" with its bytes. */
+  private emitMessage(opcode: number, payload: string | Buffer) {
+    if (opcode === 0x1) {
+      this.emit("message", { type: "text", payload });
+    } else {
+      this.emit("binaryMessage", { type: "binary", payload });
+    }
   }
 
   /**
@@ -350,14 +347,15 @@ export class WebSocketConnection extends EventEmitter {
    * connection with 1009, text that isn't valid UTF-8 once decompressed with
    * 1007.
    */
-  private inflateMessage(opcode: number, fragments: Buffer[]) {
+  private inflateMessage(
+    compression: PerMessageDeflate,
+    opcode: number,
+    fragments: Buffer[],
+  ) {
     this.inflating = true;
     this.socket.pause();
 
-    void this.perMessageDeflate!.decompress(
-      fragments,
-      this.maxMessageSize,
-    ).then(
+    void compression.decompress(fragments, this.maxMessageSize).then(
       (payload) => {
         this.inflating = false;
         // the connection closed while the message was being decompressed
@@ -369,12 +367,9 @@ export class WebSocketConnection extends EventEmitter {
             this.failConnection(1007);
             return;
           }
-          this.emit("message", {
-            type: "text",
-            payload: this.textDecoder.end(),
-          });
+          this.emitMessage(opcode, this.textDecoder.end());
         } else {
-          this.emit("binaryMessage", { type: "binary", payload });
+          this.emitMessage(opcode, payload);
         }
 
         this.socket.resume();
@@ -600,10 +595,10 @@ export class WebSocketConnection extends EventEmitter {
         .setOpcode(opcode)
         .setBinaryPayload(data);
 
-    if (this.perMessageDeflate && payload.length >= this.compressionThreshold) {
+    if (this.compression && payload.length >= this.compression.threshold) {
       // RSV1 is the "Per-Message Compressed" bit
       this.sendFrame(
-        this.perMessageDeflate
+        this.compression
           .compress(payload)
           .then((compressed) => makeFrame(compressed, 0b100)),
       );

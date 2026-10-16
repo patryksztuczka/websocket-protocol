@@ -399,8 +399,15 @@ export class PerMessageDeflate {
   // gets exactly its own output
   private deflateQueue: Promise<unknown> = Promise.resolve();
   private closed = false;
+  /** Messages smaller than this many bytes are sent uncompressed. */
+  public readonly threshold: number;
 
-  constructor(params: PerMessageDeflateParams, role: WebSocketRole) {
+  constructor(
+    params: PerMessageDeflateParams,
+    role: WebSocketRole,
+    threshold = DEFAULT_COMPRESSION_THRESHOLD,
+  ) {
+    this.threshold = threshold;
     // the server_ parameters set the server's compressor and the client's
     // decompressor, the client_ ones the other way round (RFC 7692 section 7)
     const own = role === "server" ? "server" : "client";
@@ -473,7 +480,8 @@ export class PerMessageDeflate {
     if (inflate.readableEnded) {
       // the message ended with a block that has BFINAL set, which ends the
       // DEFLATE stream (RFC 7692 section 7.2.3.4). The peer starts a new one
-      // for its next message, so this side does too.
+      // for its next message, so this side does too. Any data after that
+      // block in the same message is ignored on purpose, as ws does.
       this.discardInflate();
     } else if (this.inflateNoContextTakeover) {
       // the peer starts every message with an empty window, so there is no
