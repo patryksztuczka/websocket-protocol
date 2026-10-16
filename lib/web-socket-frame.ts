@@ -128,8 +128,6 @@ export class WebSocketFrame {
           unmaskedPayload.writeUInt8(unmaskedByte, i);
         }
 
-        console.log("unmasked.length", unmaskedPayload.length);
-
         if (this.opcode === 1) {
           this.textPayload = unmaskedPayload;
         } else if (this.opcode === 2) {
@@ -190,10 +188,10 @@ export class WebSocketFrame {
     return this.binaryPayload;
   }
 
-  public setBinaryPayload(message: string) {
+  public setBinaryPayload(message: string | Buffer) {
     const payload = Buffer.from(message);
     this.payloadLength = payload.length;
-    this.textPayload = payload;
+    this.binaryPayload = payload;
     return this;
   }
 

@@ -27,3 +27,39 @@ jobs:
 
       # Formatting, lint rules and type checking in one pass.
       - run: vp check
+
+  autobahn:
+    name: Autobahn
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # The server has no dependencies, so Node is all it needs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - run: docker pull crossbario/autobahn-testsuite
+
+      # HOST=0.0.0.0 so the container can reach the server through
+      # host.docker.internal, which points at the Docker bridge on Linux.
+      - name: Run the suite against the echo server
+        run: |
+          HOST=0.0.0.0 node test/scripts/server-test.ts > server.log 2>&1 &
+          server_pid=$!
+          for _ in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/8080) 2> /dev/null && break
+            sleep 1
+          done
+          sh test/autobahn/run-wstest.sh
+          kill "$server_pid"
+
+      # The suite itself never fails, so read its report.
+      - run: node test/autobahn/check-report.ts
+
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: autobahn-report
+          path: test/autobahn/reports/servers
+          if-no-files-found: ignore

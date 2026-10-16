@@ -1,11 +1,16 @@
-#!/bin/bash
+#!/bin/sh
+set -e
 
-# wstest -s ./fuzzingclient.json -m fuzzingclient
+# Runs the Autobahn fuzzing client against the server on port 8080.
+# Run the server first, for example with `pnpm server`.
+cd "$(dirname "$0")"
 
-docker run -it --rm \
+# No -it, so it also runs without a terminal (CI). --add-host makes
+# host.docker.internal resolve on Linux too; Docker Desktop already has it.
+docker run --rm \
+    --add-host=host.docker.internal:host-gateway \
     -v "${PWD}/config:/config" \
     -v "${PWD}/reports:/reports" \
-    -p 9001:9001 \
     --name fuzzingclient \
     crossbario/autobahn-testsuite \
     wstest -m fuzzingclient --spec /config/fuzzingclient.json

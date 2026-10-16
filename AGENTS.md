@@ -5,9 +5,10 @@ A from-scratch implementation of the WebSocket protocol ([RFC 6455](https://data
 ## Running and testing
 
 - The code imports `.ts` files directly, so it needs Node 22.6 or newer, or Node 23.6 or newer to run without extra flags.
-- Start the echo server with `node test/scripts/server-test.ts`. It listens on `127.0.0.1:8080`.
-- With the server running, run Autobahn from `test/autobahn` with `sh ./run-wstest.sh`. It needs Docker. The report is written to `test/autobahn/reports/servers/index.html`.
-- `test/autobahn/config/fuzzingclient.json` sets which test cases run. Add a section there once the feature it covers works.
+- Start the echo server with `pnpm server` (`node test/scripts/server-test.ts`). It listens on `127.0.0.1:8080`, or on the address in `HOST` if set.
+- With the server running, run Autobahn with `pnpm autobahn`. It needs Docker. The report is written to `test/autobahn/reports/servers/index.html`.
+- Then run `pnpm autobahn:check`. It prints a summary per section and exits with an error if any case failed. CI runs the same steps on every push and pull request.
+- `test/autobahn/config/fuzzingclient.json` sets which test cases run. Add a section there once the feature it covers works. Cases that still fail because of an open bug are listed in `exclude-cases`; a fix removes its own cases from that list.
 - Stop the server by the PID you got when you started it, not by matching its name.
 
 ## Commits
