@@ -108,7 +108,7 @@ export class WebSocketRequest extends EventEmitter {
       "ascii",
     );
 
-    const connection = new WebSocketConnection(this.socket);
+    const connection = new WebSocketConnection(this.socket, "server");
 
     return connection;
   }

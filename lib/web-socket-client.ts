@@ -89,7 +89,7 @@ export class WebSocketClient extends EventEmitter {
   }
 
   private succeedHandshake() {
-    const connection = new WebSocketConnection(this.socket);
+    const connection = new WebSocketConnection(this.socket, "client");
     this.emit("connect", connection);
   }
 

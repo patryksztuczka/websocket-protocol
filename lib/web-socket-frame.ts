@@ -11,7 +11,9 @@ type ParseError =
   | "INVALID_PAYLOAD_LENGTH"
   | "RESERVED_BITS_USED"
   | "RESERVED_OPCODE_USED"
-  | "CONTROL_FRAME_CAN_NOT_BE_FRAGMENTED";
+  | "CONTROL_FRAME_CAN_NOT_BE_FRAGMENTED"
+  | "MISSING_MASK"
+  | "UNEXPECTED_MASK";
 
 export class WebSocketFrame {
   private parseState: ParseState;
@@ -21,7 +23,7 @@ export class WebSocketFrame {
   private masked: number = 0;
   private payloadLength: number = 0;
   // bytes before the payload: 2, plus 2 or 8 for the extended length,
-  // plus 4 for the masking key
+  // plus 4 for the masking key when the MASK bit is set
   private headerLength: number = 2;
   private maskingKey: Buffer = Buffer.alloc(0);
   private textPayload: Buffer = Buffer.alloc(0);
@@ -32,7 +34,12 @@ export class WebSocketFrame {
     this.parseState = "DECODE_HEADER";
   }
 
-  public addData(buffer: Buffer): boolean {
+  /**
+   * Parses a frame from the start of `buffer`. `expectMasked` says whether the
+   * peer must mask its frames: true when reading frames from a client, false
+   * when reading frames from a server (RFC 6455 section 5.1).
+   */
+  public addData(buffer: Buffer, expectMasked: boolean): boolean {
     if (buffer.length < 2) return false;
     if (this.parseState === "DECODE_HEADER") {
       const firstByte = buffer.readUInt8(0);
@@ -63,6 +70,18 @@ export class WebSocketFrame {
 
       const secondByte = buffer.readUInt8(1);
       this.masked = (secondByte & 0b10000000) >> 7;
+
+      // a server must close the connection on an unmasked frame and a client
+      // on a masked one (RFC 6455 section 5.1)
+      if (expectMasked && !this.masked) {
+        this.error = "MISSING_MASK";
+        return false;
+      }
+      if (!expectMasked && this.masked) {
+        this.error = "UNEXPECTED_MASK";
+        return false;
+      }
+
       const length = secondByte & 0b01111111;
 
       if (length >= 0 && length <= 125) {
@@ -129,11 +148,13 @@ export class WebSocketFrame {
           this.headerLength + this.payloadLength,
         );
 
-        const unmaskedPayload = Buffer.alloc(this.payloadLength);
+        // the payload is masked only when the MASK bit is set (RFC 6455 section 5.3)
+        const unmaskedPayload = Buffer.from(payload);
 
-        for (let i = 0; i < this.payloadLength; i++) {
-          const unmaskedByte = payload[i] ^ this.maskingKey.readUInt8(i % 4);
-          unmaskedPayload.writeUInt8(unmaskedByte, i);
+        if (this.masked) {
+          for (let i = 0; i < this.payloadLength; i++) {
+            unmaskedPayload[i] ^= this.maskingKey[i % 4];
+          }
         }
 
         if (this.opcode === 1) {

@@ -3,14 +3,19 @@ import type { Socket } from "node:net";
 
 import { WebSocketFrame } from "./web-socket-frame.ts";
 
+/** Which end of the connection this is. Clients mask the frames they send, servers don't. */
+export type WebSocketRole = "server" | "client";
+
 export class WebSocketConnection extends EventEmitter {
   private socket: Socket;
+  private role: WebSocketRole;
   private buffer: Buffer = Buffer.allocUnsafe(0);
   private fragments: WebSocketFrame[] = [];
 
-  constructor(socket: Socket) {
+  constructor(socket: Socket, role: WebSocketRole) {
     super();
     this.socket = socket;
+    this.role = role;
   }
 
   public addSocketEventListeners() {
@@ -36,7 +41,8 @@ export class WebSocketConnection extends EventEmitter {
     const frame = new WebSocketFrame();
 
     // pause processing if frame data is incomplete
-    if (!frame.addData(this.buffer)) {
+    // frames from a client are masked, frames from a server are not
+    if (!frame.addData(this.buffer, this.role === "server")) {
       if (frame.error) {
         this.sendCloseFrame(1002);
       }
@@ -114,12 +120,13 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private combineMessage(): string {
-    const fragments = this.fragments;
-    const combinedMessage = fragments
-      .map((fragment) => fragment.getTextPayload().toString("ascii"))
-      .join("");
+    // text is UTF-8 (RFC 6455 section 5.6) and a character can be split
+    // across fragments, so join the bytes first and decode them once
+    const payloads = this.fragments.map((fragment) =>
+      fragment.getTextPayload(),
+    );
 
-    return combinedMessage;
+    return Buffer.concat(payloads).toString("utf8");
   }
 
   private sendCloseFrame(status: number) {
