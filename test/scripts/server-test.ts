@@ -11,7 +11,8 @@ httpServer.listen(8080, host, () =>
   console.log(new Date() + ` Server listens on ${host}:8080`),
 );
 
-const wsServer = new WebSocketServer(httpServer);
+// compression is off by default; Autobahn sections 12 and 13 need it
+const wsServer = new WebSocketServer(httpServer, { perMessageDeflate: true });
 
 // the server and connection events are typed, so the listeners know their
 // arguments: a string payload for "message", a Buffer for "binaryMessage"

@@ -8,6 +8,15 @@ import {
 import type { Socket } from "node:net";
 
 import {
+  PerMessageDeflate,
+  formatPerMessageDeflate,
+  negotiatePerMessageDeflate,
+  parseExtensions,
+  resolvePerMessageDeflateOptions,
+  type PerMessageDeflateParams,
+  type ResolvedPerMessageDeflateOptions,
+} from "./permessage-deflate.ts";
+import {
   WebSocketConnection,
   type WebSocketConnectionOptions,
 } from "./web-socket-connection.ts";
@@ -58,16 +67,28 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
   private isAnswered = false;
   // set once the client has ended or closed the TCP connection before an answer
   private clientGone = false;
+  // the server's compression settings, or undefined when compression is off
+  private deflateOptions: ResolvedPerMessageDeflateOptions | undefined;
+  // the agreed permessage-deflate parameters, if an offer was accepted
+  private deflateParams: PerMessageDeflateParams | undefined;
 
+  /**
+   * `deflateOptions` is `connectionOptions.perMessageDeflate` resolved; the
+   * server passes it in so it is only resolved once.
+   */
   constructor(
     request: IncomingMessage,
     socket: Socket,
     connectionOptions: WebSocketConnectionOptions = {},
+    deflateOptions = resolvePerMessageDeflateOptions(
+      connectionOptions.perMessageDeflate,
+    ),
   ) {
     super();
     this.httpRequest = request;
     this.socket = socket;
     this.connectionOptions = connectionOptions;
+    this.deflateOptions = deflateOptions;
 
     // split the request-target by hand: URL would read "//host/path" as a
     // host and change the path the client sent
@@ -175,8 +196,35 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       throw new HandshakeError("Unsupported Sec-WebSocket-Version", 426);
     }
 
+    const deflateParams = this.negotiateExtensions();
+
     // Only remember the key once every check has passed.
     this.websocketKey = key;
+    this.deflateParams = deflateParams;
+  }
+
+  /**
+   * Picks the permessage-deflate offer to accept from Sec-WebSocket-Extensions
+   * (RFC 7692 section 5), when compression is turned on. Other extensions
+   * aren't supported and are left out of the answer, which declines them
+   * (RFC 6455 section 9.1).
+   */
+  private negotiateExtensions(): PerMessageDeflateParams | undefined {
+    const header = this.httpRequest.headers["sec-websocket-extensions"];
+    if (!this.deflateOptions || header === undefined) return undefined;
+
+    try {
+      return negotiatePerMessageDeflate(
+        parseExtensions(header),
+        this.deflateOptions,
+      );
+    } catch (error) {
+      throw new HandshakeError(
+        error instanceof Error
+          ? error.message
+          : "Invalid Sec-WebSocket-Extensions header",
+      );
+    }
   }
 
   /**
@@ -196,25 +244,45 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       );
     }
     this.assertUnanswered();
-    // also covers a socket that closed before its "close" event has run
+    // also covers a socket that closed before its "close" event has run. This
+    // comes before anything is set up, so a client that has gone never gets
+    // a connection or its compression.
     if (this.clientGone || !this.socket.writable) return undefined;
     this.isAnswered = true;
     this.stopWatchingSocket();
+
+    // the accepted offer's agreed parameters (RFC 7692 section 5)
+    const extensions = this.deflateParams
+      ? `Sec-WebSocket-Extensions: ${formatPerMessageDeflate(this.deflateParams)}\r\n`
+      : "";
 
     this.socket.write(
       `HTTP/1.1 101 Switching Protocols\r\n` +
         `Upgrade: websocket\r\n` +
         `Connection: Upgrade\r\n` +
         `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(this.websocketKey)}\r\n` +
+        extensions +
         `\r\n`,
       "ascii",
     );
+
+    // compresses and decompresses the connection's messages with the agreed
+    // parameters; an offer is only accepted when compression is on
+    const compression =
+      this.deflateParams && this.deflateOptions
+        ? new PerMessageDeflate(
+            this.deflateParams,
+            "server",
+            this.deflateOptions.threshold,
+          )
+        : undefined;
 
     const connection = new WebSocketConnection(
       this.socket,
       "server",
       { path: this.path, query: this.query, headers: this.headers },
       this.connectionOptions,
+      compression,
     );
 
     try {
@@ -223,7 +291,9 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       // a listener, such as one of the server's "connect" listeners, threw
       // before the caller got the connection. Close it with 1011 (RFC 6455
       // section 7.4.1) and read it, so the peer's close frame is answered
-      // and the connection doesn't hang, then report the error.
+      // and the connection doesn't hang, then report the error. close()
+      // goes through the connection's send queue, so the close frame waits
+      // for any message the listener sent that is still being compressed.
       connection.close(1011);
       connection.addSocketEventListeners();
       throw error;

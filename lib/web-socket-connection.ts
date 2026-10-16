@@ -2,6 +2,11 @@ import EventEmitter from "node:events";
 import type { IncomingHttpHeaders } from "node:http";
 import type { Socket } from "node:net";
 
+import {
+  MessageTooBigError,
+  type PerMessageDeflate,
+  type PerMessageDeflateOptions,
+} from "./permessage-deflate.ts";
 import { ReceiveBuffer } from "./receive-buffer.ts";
 import { Utf8Decoder } from "./utf8-decoder.ts";
 import { WebSocketFrame } from "./web-socket-frame.ts";
@@ -13,6 +18,7 @@ export interface WebSocketConnectionOptions {
   /**
    * Largest message, in bytes, the connection accepts. A bigger message, or a
    * fragmented message that grows past it, closes the connection with 1009.
+   * A compressed message is held to this size once decompressed too.
    */
   maxMessageSize?: number;
   /**
@@ -21,6 +27,13 @@ export interface WebSocketConnectionOptions {
    * socket is destroyed.
    */
   closeTimeout?: number;
+  /**
+   * Compresses messages with the permessage-deflate extension (RFC 7692)
+   * when the other side supports it. `true` uses the default settings, an
+   * object changes them. Off by default, since every connection that uses it
+   * keeps zlib streams and their windows in memory while it is open.
+   */
+  perMessageDeflate?: boolean | PerMessageDeflateOptions;
 }
 
 /** What the opening handshake said about the connection. */
@@ -108,6 +121,18 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
   // opcode of the message's first frame: 0x1 text or 0x2 binary, or 0 when
   // no message is in progress
   private messageOpcode = 0;
+  // whether the message in progress had RSV1 set on its first frame
+  private messageCompressed = false;
+  // compresses and decompresses messages when permessage-deflate was agreed
+  private compression: PerMessageDeflate | undefined;
+  // set while a received message is being decompressed; no more frames are
+  // read until it has been delivered, so messages keep their order
+  private inflating = false;
+  // frames waiting to be written, in the order they were sent. A message that
+  // is still being compressed holds back every frame after it.
+  private outgoing: (WebSocketFrame | Promise<WebSocketFrame>)[] = [];
+  // end the TCP connection once the frames in `outgoing` are written
+  private endAfterOutgoing = false;
   private state: WebSocketReadyState = "open";
   // set once a close frame has been sent; no other frame may follow it
   private closeSent = false;
@@ -121,11 +146,17 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
   private closeTimer: NodeJS.Timeout | undefined;
   private listening = false;
 
+  /**
+   * `compression` is set up with the permessage-deflate parameters agreed in
+   * the opening handshake, or undefined when none were agreed. The
+   * connection closes it when the TCP connection closes.
+   */
   constructor(
     socket: Socket,
     role: WebSocketRole,
     handshake: WebSocketHandshakeInfo,
     options: WebSocketConnectionOptions = {},
+    compression?: PerMessageDeflate,
   ) {
     super();
     this.path = handshake.path;
@@ -135,6 +166,7 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
     this.role = role;
     this.maxMessageSize = options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE;
     this.closeTimeout = options.closeTimeout ?? DEFAULT_CLOSE_TIMEOUT;
+    this.compression = compression;
   }
 
   public get readyState(): WebSocketReadyState {
@@ -174,6 +206,9 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
     if (this.state === "closed") return;
     this.state = "closed";
     clearTimeout(this.closeTimer);
+    // free the zlib streams; a compression or decompression still running
+    // is dropped
+    this.compression?.close();
     this.emit("close", this.closeCode, this.closeReason);
   }
 
@@ -186,6 +221,10 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
     // a loop rather than recursion, so many small frames in one chunk can't
     // overflow the stack
     while (true) {
+      // the frames after a message that is being decompressed wait for it,
+      // so messages are delivered in the order they arrived
+      if (this.inflating) return;
+
       const frame = this.frame;
 
       // pause processing if frame data is incomplete
@@ -195,6 +234,7 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
           this.received,
           this.role === "server",
           this.maxMessageSize - this.fragmentsLength,
+          this.compression !== undefined,
         )
       ) {
         if (frame.error) {
@@ -226,6 +266,9 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
             return;
           }
           this.messageOpcode = frame.getOpcode();
+          // RSV1 on the first frame marks the whole message as compressed
+          // (RFC 7692 section 6)
+          this.messageCompressed = frame.getRsv1() === 1;
           if (
             !this.addFragment(
               this.messageOpcode === 0x1
@@ -257,14 +300,16 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
 
   /**
    * Adds a fragment and emits the message once its last fragment arrives.
-   * Returns false when the text isn't valid UTF-8; the connection has then
-   * been failed.
+   * Returns false when reading has to stop: the text isn't valid UTF-8 and
+   * the connection has been failed, or the message is being decompressed.
    */
   private addFragment(payload: Buffer, fin: number): boolean {
     this.fragmentsLength += payload.length;
 
-    // the message has the type of its first frame (RFC 6455 section 5.4)
-    if (this.messageOpcode === 0x1) {
+    // the message has the type of its first frame (RFC 6455 section 5.4).
+    // A compressed message is kept as it is until it can be decompressed
+    // whole; its text is checked after that.
+    if (this.messageOpcode === 0x1 && !this.messageCompressed) {
       // text must be valid UTF-8 (RFC 6455 sections 5.6 and 8.1). Each
       // fragment is checked as it arrives, so a broken message is refused at
       // its first bad fragment. A character can be split across fragments.
@@ -280,24 +325,85 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
 
     const opcode = this.messageOpcode;
     const fragments = this.fragments;
+    const compressed = this.messageCompressed;
     this.messageOpcode = 0;
+    this.messageCompressed = false;
     this.fragments = [];
     this.fragmentsLength = 0;
 
-    if (opcode === 0x1) {
-      this.emit("message", {
-        type: "text",
-        payload: this.textDecoder.end(),
-      });
-    } else {
-      this.emit("binaryMessage", {
-        type: "binary",
-        // a message sent in one frame needs no copy
-        payload:
-          fragments.length === 1 ? fragments[0] : Buffer.concat(fragments),
-      });
+    if (compressed && this.compression) {
+      this.inflateMessage(this.compression, opcode, fragments);
+      return false;
     }
+
+    this.emitMessage(
+      opcode === 0x1
+        ? this.textDecoder.end()
+        : // a message sent in one frame needs no copy
+          fragments.length === 1
+          ? fragments[0]!
+          : Buffer.concat(fragments),
+    );
     return true;
+  }
+
+  /**
+   * Emits a whole message: "message" with its text, or "binaryMessage" with
+   * its bytes. Text has been decoded to a string by now, binary stays a Buffer.
+   */
+  private emitMessage(payload: string | Buffer) {
+    if (typeof payload === "string") {
+      this.emit("message", { type: "text", payload });
+    } else {
+      this.emit("binaryMessage", { type: "binary", payload });
+    }
+  }
+
+  /**
+   * Decompresses a compressed message and emits it (RFC 7692 section 6.2).
+   * zlib works asynchronously, so reading stops and the socket is paused
+   * until the message has been delivered; then the frames that arrived after
+   * it are read. A message that grows past `maxMessageSize` closes the
+   * connection with 1009, text that isn't valid UTF-8 once decompressed with
+   * 1007.
+   */
+  private inflateMessage(
+    compression: PerMessageDeflate,
+    opcode: number,
+    fragments: Buffer[],
+  ) {
+    this.inflating = true;
+    this.socket.pause();
+
+    void compression.decompress(fragments, this.maxMessageSize).then(
+      (payload) => {
+        this.inflating = false;
+        // the connection closed while the message was being decompressed
+        if (this.readingStopped || this.state === "closed") return;
+
+        if (opcode === 0x1) {
+          // text must be valid UTF-8 (RFC 6455 section 8.1)
+          if (!this.textDecoder.write(payload, true)) {
+            this.failConnection(1007);
+            return;
+          }
+          this.emitMessage(this.textDecoder.end());
+        } else {
+          this.emitMessage(payload);
+        }
+
+        this.socket.resume();
+        // read the frames that arrived while the message was decompressed
+        this.processReceivedData();
+      },
+      (error: unknown) => {
+        this.inflating = false;
+        if (this.readingStopped || this.state === "closed") return;
+        // 1009 when the message is too big (RFC 6455 section 7.4.1). Data
+        // that isn't valid DEFLATE isn't valid for the message's type: 1007.
+        this.failConnection(error instanceof MessageTooBigError ? 1009 : 1007);
+      },
+    );
   }
 
   /**
@@ -342,7 +448,7 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
     // both close frames have been exchanged. The server closes the TCP
     // connection first, the client waits for it (RFC 6455 section 7.1.1); the
     // close timer covers a peer that never does.
-    if (this.role === "server") this.socket.end();
+    if (this.role === "server") this.endSocket();
   }
 
   /**
@@ -376,7 +482,7 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
   private failConnection(status: number) {
     this.stopReading();
     if (!this.closeSent) this.sendCloseFrame(status);
-    this.socket.end();
+    this.endSocket();
   }
 
   private stopReading() {
@@ -384,11 +490,24 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
     // nothing more will be read, so let go of the buffered data
     this.received = new ReceiveBuffer();
     this.fragments = [];
+    // a socket paused for a decompression would hold back "end" and "close";
+    // what still arrives is dropped by handleSocketData
+    this.socket.resume();
+  }
+
+  /**
+   * Closes this side of the TCP connection once every queued frame has been
+   * written, so a close frame waiting for a compression still goes out.
+   */
+  private endSocket() {
+    if (this.outgoing.length === 0) this.socket.end();
+    else this.endAfterOutgoing = true;
   }
 
   /**
    * Sends a close frame. Leaving out `code` sends an empty one. The
-   * connection then enters "closing" and the close timer starts.
+   * connection then enters "closing"; the close timer starts once the frame
+   * has been written, which may be later if a compression is still running.
    */
   private sendCloseFrame(code?: number, reason = "") {
     if (this.closeSent) return;
@@ -403,12 +522,20 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
 
     const closeFrame = new WebSocketFrame();
     closeFrame.setFin(1).setRsv(0x000).setOpcode(0x8).setTextPayload(payload);
+    // a frame that can't be written won't start the timer, so start it here
+    if (!this.socket.writable) this.startCloseTimer();
     this.sendFrame(closeFrame);
 
     // the close frame is the last frame this side sends (RFC 6455 section 5.5.1)
     this.closeSent = true;
     if (this.state === "open") this.state = "closing";
+  }
 
+  /**
+   * Destroys the socket if the closing handshake hasn't finished
+   * `closeTimeout` milliseconds after the close frame was written.
+   */
+  private startCloseTimer() {
     this.closeTimer = setTimeout(
       () => this.socket.destroy(),
       this.closeTimeout,
@@ -423,32 +550,90 @@ export class WebSocketConnection extends EventEmitter<WebSocketConnectionEvents>
     this.sendFrame(pongFrame);
   }
 
-  private sendFrame(frame: WebSocketFrame) {
+  /**
+   * Sends a frame, or a frame that is still being compressed. Frames leave in
+   * the order they were sent: while a compression runs, the frames after it
+   * wait in `outgoing`, close frames included.
+   */
+  private sendFrame(frame: WebSocketFrame | Promise<WebSocketFrame>) {
     // nothing may follow a close frame (RFC 6455 section 5.5.1), and a
     // closed socket can't be written to
     if (this.closeSent || !this.socket.writable) return;
+
+    if (frame instanceof WebSocketFrame) {
+      if (this.outgoing.length === 0) {
+        this.writeFrame(frame);
+        return;
+      }
+    } else {
+      // writeOutgoing handles a failed compression once it gets to it; until
+      // then this keeps it from counting as an unhandled rejection
+      frame.catch(() => {});
+    }
+    this.outgoing.push(frame);
+    // the first frame in the queue starts writing it; until the queue is
+    // empty again, writeOutgoing takes care of the frames added after it
+    if (this.outgoing.length === 1) void this.writeOutgoing();
+  }
+
+  /** Writes the queued frames in order, waiting for each compression to finish. */
+  private async writeOutgoing() {
+    while (this.outgoing.length > 0) {
+      let frame: WebSocketFrame | undefined;
+      try {
+        frame = await this.outgoing[0];
+      } catch {
+        // compressing failed. If the connection is still open the zlib
+        // stream broke, and this side can't keep its window in step with
+        // the peer's any more (RFC 6455 section 7.4.1, 1011).
+        if (this.state !== "closed") this.failConnection(1011);
+      }
+      void this.outgoing.shift();
+      if (frame) this.writeFrame(frame);
+    }
+    if (this.endAfterOutgoing) this.socket.end();
+  }
+
+  private writeFrame(frame: WebSocketFrame) {
+    if (!this.socket.writable) return;
     // every frame a client sends is masked, every frame a server sends is not
     // (RFC 6455 section 5.1)
     frame.setMasked(this.role === "client" ? 1 : 0);
     this.socket.write(frame.toBuffer());
+    if (frame.getOpcode() === 0x8) this.startCloseTimer();
   }
 
   /**
    * Sends a message. Once the connection is closing or closed the message is
    * silently dropped, since nothing may be sent after a close frame (RFC 6455
    * section 5.5.1).
+   *
+   * When permessage-deflate was agreed, a message of at least the threshold
+   * (1024 bytes by default) is compressed and sent with RSV1 set (RFC 7692
+   * section 6.1). Compression is asynchronous, but messages and other frames
+   * still leave in the order they were sent.
    */
   public send(type: "text" | "binary", message: string | Buffer) {
-    const frame = new WebSocketFrame();
+    if (this.closeSent || !this.socket.writable) return;
 
-    frame.setFin(1).setRsv(0x000);
+    const opcode = type === "text" ? 0x1 : 0x2;
+    const payload = Buffer.isBuffer(message) ? message : Buffer.from(message);
+    const makeFrame = (data: Buffer, rsv: number) =>
+      new WebSocketFrame()
+        .setFin(1)
+        .setRsv(rsv)
+        .setOpcode(opcode)
+        .setBinaryPayload(data);
 
-    if (type === "text") {
-      frame.setOpcode(0x1).setTextPayload(message);
-    } else if (type === "binary") {
-      frame.setOpcode(0x2).setBinaryPayload(message);
+    if (this.compression && payload.length >= this.compression.threshold) {
+      // RSV1 is the "Per-Message Compressed" bit
+      this.sendFrame(
+        this.compression
+          .compress(payload)
+          .then((compressed) => makeFrame(compressed, 0b100)),
+      );
+    } else {
+      this.sendFrame(makeFrame(payload, 0b000));
     }
-
-    this.sendFrame(frame);
   }
 }
