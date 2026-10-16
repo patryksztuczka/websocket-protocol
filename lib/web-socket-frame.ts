@@ -8,6 +8,7 @@ type ParseState =
 
 type ParseError =
   | "PAYLOAD_TOO_LARGE"
+  | "INVALID_PAYLOAD_LENGTH"
   | "RESERVED_BITS_USED"
   | "RESERVED_OPCODE_USED"
   | "CONTROL_FRAME_CAN_NOT_BE_FRAGMENTED";
@@ -19,6 +20,9 @@ export class WebSocketFrame {
   private opcode: number = 0;
   private masked: number = 0;
   private payloadLength: number = 0;
+  // bytes before the payload: 2, plus 2 or 8 for the extended length,
+  // plus 4 for the masking key
+  private headerLength: number = 2;
   private maskingKey: Buffer = Buffer.alloc(0);
   private textPayload: Buffer = Buffer.alloc(0);
   private binaryPayload: Buffer = Buffer.alloc(0);
@@ -74,15 +78,27 @@ export class WebSocketFrame {
     }
 
     if (this.parseState === "WAITING_FOR_16_BIT_LENGTH") {
-      const lengthBytes = buffer.subarray(2, 4);
-      this.payloadLength = lengthBytes.readUint16BE();
+      if (buffer.length < 4) return false;
+      this.payloadLength = buffer.readUInt16BE(2);
+      this.headerLength = 4;
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
     if (this.parseState === "WAITING_FOR_64_BIT_LENGTH") {
-      const lengthBytes = buffer.subarray(2, 10);
-      // TODO: verify if this conversion can lead to an error
-      this.payloadLength = Number(lengthBytes.readBigInt64BE());
+      if (buffer.length < 10) return false;
+      const length = buffer.readBigUInt64BE(2);
+      // the most significant bit MUST be 0 (RFC 6455 section 5.2)
+      if (length >> 63n !== 0n) {
+        this.error = "INVALID_PAYLOAD_LENGTH";
+        return false;
+      }
+      // larger lengths can't be stored in a number without losing precision
+      if (length > BigInt(Number.MAX_SAFE_INTEGER)) {
+        this.error = "PAYLOAD_TOO_LARGE";
+        return false;
+      }
+      this.payloadLength = Number(length);
+      this.headerLength = 10;
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
@@ -95,31 +111,23 @@ export class WebSocketFrame {
 
     if (this.parseState === "WAITING_FOR_MASK_KEY") {
       if (this.masked) {
-        if (this.payloadLength <= 125) {
-          this.maskingKey = buffer.subarray(2, 6);
-        } else if (this.payloadLength <= 65535) {
-          this.maskingKey = buffer.subarray(4, 8);
-        } else if (this.payloadLength <= 18446744073709551615) {
-          this.maskingKey = buffer.subarray(10, 14);
-        }
-        this.parseState = "WAITING_FOR_PAYLOAD";
-      } else {
-        this.parseState = "WAITING_FOR_PAYLOAD";
+        if (buffer.length < this.headerLength + 4) return false;
+        this.maskingKey = buffer.subarray(
+          this.headerLength,
+          this.headerLength + 4,
+        );
+        this.headerLength += 4;
       }
+      this.parseState = "WAITING_FOR_PAYLOAD";
     }
 
     if (this.parseState === "WAITING_FOR_PAYLOAD") {
-      // 6 = firstByte + secondByte + 4 maskBytes
-      if (buffer.length >= this.payloadLength + 6) {
-        // TODO: verify is it ok to alloc 0 - probably it's not
-        let payload: Buffer = Buffer.alloc(0);
-        if (this.payloadLength <= 125) {
-          payload = buffer.subarray(6);
-        } else if (this.payloadLength <= 65535) {
-          payload = buffer.subarray(8, this.payloadLength + 8);
-        } else if (this.payloadLength <= 18446744073709551615) {
-          payload = buffer.subarray(14);
-        }
+      // wait until the whole frame has arrived
+      if (buffer.length >= this.headerLength + this.payloadLength) {
+        const payload = buffer.subarray(
+          this.headerLength,
+          this.headerLength + this.payloadLength,
+        );
 
         const unmaskedPayload = Buffer.alloc(this.payloadLength);
 
@@ -143,6 +151,11 @@ export class WebSocketFrame {
     }
 
     return false;
+  }
+
+  /** Number of bytes the frame takes up on the wire, header included. */
+  public getFrameLength() {
+    return this.headerLength + this.payloadLength;
   }
 
   public getFin() {
