@@ -7,7 +7,10 @@
     "check": "vp check",
     "lint": "vp lint",
     "fmt": "vp fmt",
-    "fmt:check": "vp fmt --check"
+    "fmt:check": "vp fmt --check",
+    "server": "node test/scripts/server-test.ts",
+    "autobahn": "sh test/autobahn/run-wstest.sh",
+    "autobahn:check": "node test/autobahn/check-report.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
