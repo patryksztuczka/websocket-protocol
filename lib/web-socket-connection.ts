@@ -1,21 +1,43 @@
 import EventEmitter from "node:events";
 import type { Socket } from "node:net";
 
+import { ReceiveBuffer } from "./receive-buffer.ts";
 import { WebSocketFrame } from "./web-socket-frame.ts";
 
 /** Which end of the connection this is. Clients mask the frames they send, servers don't. */
 export type WebSocketRole = "server" | "client";
 
+export interface WebSocketConnectionOptions {
+  /**
+   * Largest message, in bytes, the connection accepts. A bigger message, or a
+   * fragmented message that grows past it, closes the connection with 1009.
+   */
+  maxMessageSize?: number;
+}
+
+/** 64 MiB */
+export const DEFAULT_MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
+
 export class WebSocketConnection extends EventEmitter {
   private socket: Socket;
   private role: WebSocketRole;
-  private buffer: Buffer = Buffer.allocUnsafe(0);
+  private maxMessageSize: number;
+  private received = new ReceiveBuffer();
+  // the frame being read; it is kept between "data" events until it is complete
+  private frame = new WebSocketFrame();
   private fragments: WebSocketFrame[] = [];
+  // payload bytes in `fragments`
+  private fragmentsLength = 0;
 
-  constructor(socket: Socket, role: WebSocketRole) {
+  constructor(
+    socket: Socket,
+    role: WebSocketRole,
+    options: WebSocketConnectionOptions = {},
+  ) {
     super();
     this.socket = socket;
     this.role = role;
+    this.maxMessageSize = options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE;
   }
 
   public addSocketEventListeners() {
@@ -25,7 +47,9 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private handleSocketData(data: Buffer) {
-    this.buffer = Buffer.from([...this.buffer, ...data]);
+    // after a broken frame the rest of the data can't be read, so drop it
+    if (this.frame.error) return;
+    this.received.push(data);
     this.processReceivedData();
   }
 
@@ -38,84 +62,101 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private processReceivedData() {
-    const frame = new WebSocketFrame();
+    // a loop rather than recursion, so many small frames in one chunk can't
+    // overflow the stack
+    while (true) {
+      const frame = this.frame;
 
-    // pause processing if frame data is incomplete
-    // frames from a client are masked, frames from a server are not
-    if (!frame.addData(this.buffer, this.role === "server")) {
-      if (frame.error) {
-        this.sendCloseFrame(1002);
+      // pause processing if frame data is incomplete
+      // frames from a client are masked, frames from a server are not
+      if (
+        !frame.addData(
+          this.received,
+          this.role === "server",
+          this.maxMessageSize - this.fragmentsLength,
+        )
+      ) {
+        if (frame.error) {
+          // nothing more will be read, so let go of the buffered data
+          this.received = new ReceiveBuffer();
+          this.fragments = [];
+          // 1009 when the message is too big (RFC 6455 section 7.4.1)
+          this.sendCloseFrame(frame.error === "MESSAGE_TOO_BIG" ? 1009 : 1002);
+        }
+        return;
       }
-      return;
-    }
 
-    this.buffer = this.buffer.subarray(frame.getFrameLength());
+      this.frame = new WebSocketFrame();
+      const fragmentCount = this.fragments.length;
 
-    switch (frame.getOpcode()) {
-      case 0x0:
-        if (
-          (this.fragments.length === 0 && frame.getFin()) ||
-          this.fragments.length === 0
-        ) {
-          this.sendCloseFrame(1002);
-          return;
-        }
-        this.fragments.push(frame);
-        if (frame.getFin()) {
-          // make message and emit
-          const message = this.combineMessage();
-          this.emit("message", {
-            type: "text",
-            payload: message,
+      switch (frame.getOpcode()) {
+        case 0x0:
+          if (
+            (this.fragments.length === 0 && frame.getFin()) ||
+            this.fragments.length === 0
+          ) {
+            this.sendCloseFrame(1002);
+            return;
+          }
+          this.fragments.push(frame);
+          if (frame.getFin()) {
+            // make message and emit
+            const message = this.combineMessage();
+            this.emit("message", {
+              type: "text",
+              payload: message,
+            });
+            this.fragments = [];
+          }
+          break;
+
+        case 0x1:
+          if (this.fragments.length !== 0) {
+            this.sendCloseFrame(1002);
+            return;
+          }
+          this.fragments.push(frame);
+          if (frame.getFin()) {
+            // make message and emit
+
+            const message = this.combineMessage();
+
+            this.emit("message", {
+              type: "text",
+              payload: message,
+            });
+            this.fragments = [];
+          }
+
+          break;
+        case 0x2:
+          // handle binary frames fragmentation
+          this.emit("binaryMessage", {
+            type: "binary",
+            payload: frame.getBinaryPayload(),
           });
-          this.fragments = [];
-        }
-        break;
+          break;
+        case 0x8:
+          this.emit("end");
+          this.sendCloseFrame(1000);
+          break;
 
-      case 0x1:
-        if (this.fragments.length !== 0) {
-          this.sendCloseFrame(1002);
-          return;
-        }
-        this.fragments.push(frame);
-        if (frame.getFin()) {
-          // make message and emit
+        case 0x9:
+          this.sendPongFrame(frame.getTextPayload());
+          break;
 
-          const message = this.combineMessage();
+        case 0xa:
+          // a pong may arrive unsolicited as a heartbeat and must not be answered (RFC 6455 5.5.3)
+          this.emit("pong", frame.getTextPayload());
+          break;
+      }
 
-          this.emit("message", {
-            type: "text",
-            payload: message,
-          });
-          this.fragments = [];
-        }
-
-        break;
-      case 0x2:
-        // handle binary frames fragmentation
-        this.emit("binaryMessage", {
-          type: "binary",
-          payload: frame.getBinaryPayload(),
-        });
-        break;
-      case 0x8:
-        this.emit("end");
-        this.sendCloseFrame(1000);
-        break;
-
-      case 0x9:
-        this.sendPongFrame(frame.getTextPayload());
-        break;
-
-      case 0xa:
-        // a pong may arrive unsolicited as a heartbeat and must not be answered (RFC 6455 5.5.3)
-        this.emit("pong", frame.getTextPayload());
-        break;
-    }
-
-    if (this.buffer.length > 0) {
-      // TODO: check if this can block other connections processing
-      this.processReceivedData();
+      // keep a running total of the message being reassembled
+      if (this.fragments.length === 0) {
+        this.fragmentsLength = 0;
+      } else if (this.fragments.length > fragmentCount) {
+        this.fragmentsLength += frame.getPayloadLength();
+      }
     }
   }
 
