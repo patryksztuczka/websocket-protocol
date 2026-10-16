@@ -25,7 +25,7 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private handleSocketClose() {
-    // console.log("Socket closed connection", this.socket.closed);
+    // TODO: track the closed state (#18)
   }
 
   private handleSocketEnd() {
@@ -33,14 +33,11 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private processReceivedData() {
-    console.log("new frame");
     const frame = new WebSocketFrame();
 
     // pause processing if frame data is incomplete
     if (!frame.addData(this.buffer)) {
-      console.log("frame not complete or error thrown - waiting...");
       if (frame.error) {
-        console.log("ERR", frame.error);
         this.sendCloseFrame(1002);
       }
       return;
@@ -64,7 +61,6 @@ export class WebSocketConnection extends EventEmitter {
         if (frame.getFin()) {
           // make message and emit
           const message = this.combineMessage();
-          console.log("mess", message);
           this.emit("message", {
             type: "text",
             payload: message,
@@ -170,7 +166,7 @@ export class WebSocketConnection extends EventEmitter {
     });
   }
 
-  public send(type: "text" | "binary", message: string) {
+  public send(type: "text" | "binary", message: string | Buffer) {
     const frame = new WebSocketFrame();
 
     frame.setFin(1).setRsv(0x000).setMasked(0);

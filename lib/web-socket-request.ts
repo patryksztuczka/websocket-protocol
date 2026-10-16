@@ -56,7 +56,7 @@ export class WebSocketRequest extends EventEmitter {
 
   public acceptRequest() {
     if (!this.websocketKey) {
-      // handle error
+      // TODO: reject the handshake with an HTTP error response (#14)
       return;
     }
 
@@ -67,9 +67,6 @@ export class WebSocketRequest extends EventEmitter {
         `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(this.websocketKey)}\r\n` +
         `\r\n`,
       "ascii",
-      (_err) => {
-        // handle error
-      },
     );
 
     const connection = new WebSocketConnection(this.socket);
