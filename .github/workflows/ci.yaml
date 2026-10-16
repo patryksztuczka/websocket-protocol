@@ -28,6 +28,9 @@ jobs:
       # Formatting, lint rules and type checking in one pass.
       - run: vp check
 
+      # Client tests (node:test); they start their own servers on free ports.
+      - run: vp run test
+
   autobahn:
     name: Autobahn
     runs-on: ubuntu-24.04
