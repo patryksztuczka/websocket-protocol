@@ -1,10 +1,10 @@
 # WebSocket protocol
 
-A from-scratch implementation of the WebSocket protocol ([RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455)) in TypeScript, built to learn how the protocol works. It uses only Node's built-in modules and has no runtime dependencies. The server is the main focus. The client so far handles only the opening handshake.
+A from-scratch implementation of the WebSocket protocol ([RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455)) in TypeScript, built to learn how the protocol works. It uses only Node's built-in modules and has no runtime dependencies. The server is the main focus. The client connects to `ws://` addresses and sends and receives messages.
 
 ## Running and testing
 
-- The code imports `.ts` files directly, so it needs Node 22.6 or newer, or Node 23.6 or newer to run without extra flags.
+- The code imports `.ts` files directly. It needs Node 24 or newer (`engines` in `package.json`), which runs them without extra flags.
 - Start the echo server with `pnpm server` (`node test/scripts/server-test.ts`). It listens on `127.0.0.1:8080`, or on the address in `HOST` if set.
 - With the server running, run Autobahn with `pnpm autobahn`. It needs Docker. The report is written to `test/autobahn/reports/servers/index.html`.
 - Then run `pnpm autobahn:check`. It prints a summary per section and exits with an error if any case failed. CI runs the same steps on every push and pull request.
