@@ -9,13 +9,21 @@ import type {
 } from "./web-socket-connection.ts";
 import type { Socket } from "node:net";
 
+/** The events the server emits and the arguments their listeners get. */
+export interface WebSocketServerEvents {
+  /** A handshake passed the checks; answer it with accept() or reject(). */
+  request: [request: WebSocketRequest];
+  /** A request was accepted and its connection is open. */
+  connect: [connection: WebSocketConnection];
+}
+
 /**
  * Emits "request" with a WebSocketRequest for every opening handshake that
  * passed the checks of RFC 6455 4.2.1, so the app can accept() or reject() it.
  * Without a "request" listener every such request is accepted. Emits
  * "connect" with the WebSocketConnection of every accepted request.
  */
-export class WebSocketServer extends EventEmitter {
+export class WebSocketServer extends EventEmitter<WebSocketServerEvents> {
   private httpServer: Server | HttpsServer;
   private connections: WebSocketConnection[] = [];
   private connectionOptions: WebSocketConnectionOptions;

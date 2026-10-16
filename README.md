@@ -83,6 +83,40 @@ wsServer.on("request", (request) => {
 });
 ```
 
+### Routing
+
+`WebSocketRouter` routes connections by path during the handshake, and `MessageRouter` routes a connection's JSON messages by type. Both are in `lib/web-socket-router.ts` and work on top of the events above.
+
+```ts
+import { MessageRouter, WebSocketRouter } from "./lib/web-socket-router.ts";
+
+const router = new WebSocketRouter(wsServer);
+
+router.route("/rooms/:id", (connection, { params, query }) => {
+  // "/rooms/42?name=Ada" gives params.id "42" and query.get("name") "Ada"
+  const messages = new MessageRouter(connection);
+
+  // { "type": "say", "data": "hi" } calls this handler with "hi"
+  messages.on("say", (data) => {
+    messages.send("said", {
+      room: params["id"],
+      from: query.get("name"),
+      text: data,
+    });
+  });
+
+  messages.fallback((_data, type) => {
+    console.log(`No handler for ${type}`);
+  });
+});
+```
+
+- Routes are tried in the order they were added, and the first match wins. A `:name` segment matches one non-empty segment, and its value is percent-decoded into `params`. A path no route matches gets `404 Not Found` and never a 101.
+- The router accepts the request, calls the handler and then starts reading, so there is no need to call `addSocketEventListeners()`. `connect` still fires for every routed connection, before its handler.
+- Auth goes in a `request` listener added before the router. If it rejects the request, the router leaves it alone.
+- Each text message must be a JSON object with a string `type`. Anything else closes the connection with 1007. A type without a handler goes to the fallback, or is ignored if there is no fallback. `messages.send(type, data)` sends a message in the same shape.
+- Binary messages aren't routed. They still arrive through `binaryMessage`.
+
 The client is `WebSocketClient`. `client.connect("ws://127.0.0.1:8080/")` emits `connect` with a connection that has the same events and methods, or `connectionFailed` with the reason. [`test/scripts/client-test.ts`](test/scripts/client-test.ts) shows it in use.
 
 ### Secure WebSockets (`wss://`)
@@ -140,11 +174,11 @@ client.connect("wss://localhost:8443/", { tls: { ca: cert } });
 - [x] **Client** — The client connects to `ws://` addresses, sends and receives messages, and reports a failed connection with `connectionFailed`.
 - [x] **Secure WebSockets (`wss://`)** — The client connects to `wss://` addresses, port 443 by default, and takes TLS options such as `ca`. The server works with an `https.Server`.
 - [x] **Client Compliance Testing** — Client tests with `node:test` cover the handshake, text and binary messages, long messages, the closing handshake, failed connections and `wss://`.
+- [x] **Router Implementation** — `WebSocketRouter` sends connections to handlers by path, with `:params`, and answers 404 for a path no route matches. `MessageRouter` sends JSON `{ type, data }` messages to handlers by type, with a fallback for unknown types.
 
 ### ⏳ Not Done / Planned
 
 - [ ] **Compression** — The `permessage-deflate` extension isn't implemented, so Autobahn sections 12 and 13 are not run. See [#42](https://github.com/patryksztuczka/websocket-protocol/issues/42).
-- [ ] **Router Implementation** — Design and implement a lightweight internal router to dispatch messages to appropriate handlers based on message type or path. This is an idea for later, see [#43](https://github.com/patryksztuczka/websocket-protocol/issues/43).
 
 See the [issues page](https://github.com/patryksztuczka/websocket-protocol/issues) for open bugs and planned work.
 
@@ -186,7 +220,7 @@ You need Node 24 or newer, which runs the `.ts` files directly, and [pnpm](https
    pnpm autobahn:check
    ```
 
-The `node:test` tests for the client and the server's `request` event start their own servers, so they don't need the steps above:
+The `node:test` tests for the client, the server's `request` event and the routers start their own servers, so they don't need the steps above:
 
 ```bash
 pnpm test
