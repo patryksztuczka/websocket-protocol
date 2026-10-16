@@ -1,6 +1,6 @@
 # WebSocket protocol
 
-A from-scratch implementation of the WebSocket protocol ([RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455)) in TypeScript, built to learn how the protocol works. It uses only Node's built-in modules and has no runtime dependencies. The server is the main focus. The client connects to `ws://` addresses and sends and receives messages.
+A from-scratch implementation of the WebSocket protocol ([RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455)) in TypeScript, built to learn how the protocol works. It uses only Node's built-in modules and has no runtime dependencies. The server is the main focus. The client connects to `ws://` and `wss://` addresses and sends and receives messages.
 
 ## Running and testing
 
