@@ -61,6 +61,8 @@ describe("WebSocketRouter", () => {
       .route("/rooms/:id", record("room"))
       .route("/files/:folder/:name", record("file"))
       .route("/café", record("café"))
+      // a pattern written percent-encoded: "na%C3%AFve" is "naïve"
+      .route("/na%C3%AFve", record("naïve"))
       .route("/proto/:__proto__", record("proto"))
       .route("/", record("root"));
 
@@ -147,6 +149,16 @@ describe("WebSocketRouter", () => {
     const lobby = await open("/rooms/%6Cobby");
     assert.equal(lobby.name, "lobby");
     lobby.client.close();
+  });
+
+  test("a pattern written percent-encoded matches the decoded path", async () => {
+    // the pattern is "/na%C3%AFve"; this path is sent as "/na%C3%AFve" too,
+    // and "/na%c3%afve" with lowercase hex decodes to the same "naïve"
+    for (const path of ["/naïve", "/na%c3%afve"]) {
+      const { client, name } = await open(path);
+      assert.equal(name, "naïve", path);
+      client.close();
+    }
   });
 
   test("a param can be called __proto__", async () => {
@@ -286,6 +298,36 @@ describe("WebSocketRouter.handle() in the app's request listener", () => {
     // the server read the client's close frame and closed the TCP
     // connection, rather than waiting out the 5 s close timeout
     assert.ok(Date.now() - started < 1000);
+  });
+
+  test("a connect listener that throws closes the connection with 1011, and handle() rethrows", async () => {
+    handled = [];
+    const failing = () => {
+      throw new Error("connect listener failed");
+    };
+    server.wsServer.on("connect", failing);
+    const errors: unknown[] = [];
+    listener = (request) => {
+      try {
+        router.handle(request);
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+
+    try {
+      const client = await connect(`${server.url}/chat`);
+      const started = Date.now();
+      const [code] = await once(client, "close");
+      assert.equal(code, 1011);
+      assert.match(String(errors[0]), /connect listener failed/);
+      // "connect" fires before the route handler, so the handler never ran
+      assert.deepEqual(handled, []);
+      // the connection was read, so the closing handshake finished early
+      assert.ok(Date.now() - started < 1000);
+    } finally {
+      server.wsServer.off("connect", failing);
+    }
   });
 });
 

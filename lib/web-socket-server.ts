@@ -57,12 +57,13 @@ export class WebSocketServer extends EventEmitter<WebSocketServerEvents> {
     // the app may answer later, so the connection is added whenever it is
     // accepted rather than right here
     wsRequest.once("accept", (connection) => {
-      this.emit("connect", connection);
       this.connections.push(connection);
       // forget the connection once it has closed
       socket.once("close", () => {
         this.connections = this.connections.filter((c) => c !== connection);
       });
+      // last, so a "connect" listener that throws can't stop the above
+      this.emit("connect", connection);
     });
 
     // apps that don't listen to "request" get every valid request accepted,

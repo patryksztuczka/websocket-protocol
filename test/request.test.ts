@@ -256,22 +256,68 @@ describe("request event", () => {
     assert.equal(answer.status, 400);
     assert.equal(requests, 0);
   });
+
+  test("an unsupported version gets 426 with the version the server speaks", async () => {
+    let requests = 0;
+    onRequest(() => requests++);
+
+    const answer = await handshake(port, "/chat", {
+      "sec-websocket-version": "8",
+    });
+    // RFC 6455 4.4
+    assert.equal(answer.status, 426);
+    assert.equal(answer.headers["sec-websocket-version"], "13");
+    assert.equal(answer.headers["upgrade"], "websocket");
+    assert.equal(requests, 0);
+  });
+
+  test("a connect listener that throws: accept() rethrows, and the connection is closed with 1011 and still read", async () => {
+    const failing = () => {
+      throw new Error("connect listener failed");
+    };
+    // before the suite's listener that starts reading, so it never runs
+    wsServer.prependListener("connect", failing);
+    const errors: unknown[] = [];
+    onRequest((request) => {
+      try {
+        request.accept();
+      } catch (error) {
+        errors.push(error);
+      }
+    });
+
+    try {
+      const client = await connect(`${url}/chat`);
+      const started = Date.now();
+      const [code] = await once(client, "close");
+      assert.equal(code, 1011);
+      assert.match(String(errors[0]), /connect listener failed/);
+      // the server read the client's close frame and closed the TCP
+      // connection, rather than waiting out the 5 s close timeout
+      assert.ok(Date.now() - started < 1000);
+    } finally {
+      wsServer.off("connect", failing);
+    }
+  });
 });
 
 describe("without a request listener", () => {
   test("every valid request is accepted and emits connect, as before", async () => {
     const server = await startServer();
-    server.wsServer.on("connect", (connection) =>
-      connection.addSocketEventListeners(),
-    );
-    const connected = once(server.wsServer, "connect");
+    // a failing assertion still tears the server down, so nothing hangs
+    try {
+      server.wsServer.on("connect", (connection) =>
+        connection.addSocketEventListeners(),
+      );
+      const connected = once(server.wsServer, "connect");
 
-    const client = await connect(`${server.url}/anything?x=1`);
-    const [connection] = await connected;
-    assert.equal(connection.path, "/anything");
-    assert.equal(connection.query.get("x"), "1");
-
-    client.close();
-    server.close();
+      const client = await connect(`${server.url}/anything?x=1`);
+      const [connection] = await connected;
+      assert.equal(connection.path, "/anything");
+      assert.equal(connection.query.get("x"), "1");
+      client.close();
+    } finally {
+      server.close();
+    }
   });
 });

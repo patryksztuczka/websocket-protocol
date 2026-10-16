@@ -184,6 +184,10 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
    * returns the open connection. Returns undefined, and opens nothing, if the
    * client has already gone (see `closed`). Throws if the request has already
    * been answered.
+   *
+   * If an "accept" listener throws, such as one of the server's "connect"
+   * listeners, the connection is closed with 1011, still read, and accept()
+   * rethrows the error.
    */
   public accept(): WebSocketConnection | undefined {
     if (!this.websocketKey) {
@@ -213,7 +217,17 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
       this.connectionOptions,
     );
 
-    this.emit("accept", connection);
+    try {
+      this.emit("accept", connection);
+    } catch (error) {
+      // a listener, such as one of the server's "connect" listeners, threw
+      // before the caller got the connection. Close it with 1011 (RFC 6455
+      // section 7.4.1) and read it, so the peer's close frame is answered
+      // and the connection doesn't hang, then report the error.
+      connection.close(1011);
+      connection.addSocketEventListeners();
+      throw error;
+    }
     return connection;
   }
 
