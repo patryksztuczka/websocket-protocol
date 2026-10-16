@@ -35,11 +35,16 @@ export interface RouteContext {
  * would lose messages that arrive while it waits. route() therefore rejects
  * handlers that return a promise (see NotAPromise). Do async work, such as an
  * auth check, before calling handle().
+ *
+ * The return type is `void | undefined` rather than `void` because a
+ * function typed to return plain `void` accepts any function, an async one
+ * included. With the union, a handler declared with this type can't be async
+ * either.
  */
 export type RouteHandler = (
   connection: WebSocketConnection,
   context: RouteContext,
-) => void;
+) => void | undefined;
 
 /**
  * `R`, unless it is a promise. route() types its handler's return as this,
@@ -53,7 +58,8 @@ type Segment = { literal: string } | { param: string };
 
 interface Route {
   segments: Segment[];
-  handler: RouteHandler;
+  // route() has checked it isn't async; what it returns isn't used
+  handler: (connection: WebSocketConnection, context: RouteContext) => unknown;
 }
 
 /**

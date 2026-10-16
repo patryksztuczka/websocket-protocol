@@ -13,6 +13,7 @@ import {
   MessageRouter,
   WebSocketRouter,
   type RouteContext,
+  type RouteHandler,
   type RouteParams,
 } from "../lib/web-socket-router.ts";
 import {
@@ -202,6 +203,37 @@ describe("WebSocketRouter", () => {
       /more than once/,
     );
     assert.throws(() => router.route("/files/:", () => {}), /needs a name/);
+  });
+
+  // `pnpm check` type-checks this file: if async handlers ever type-check
+  // again, the @ts-expect-error lines below are unused and the check fails
+  test("async route handlers are a type error, inline or declared with RouteHandler", () => {
+    const router = new WebSocketRouter();
+    let count = 0;
+
+    // these type-check: a block body, a void expression, and a value
+    router.route("/a", (connection) => {
+      count += connection.path.length;
+    });
+    router.route("/b", (connection) => console.debug(connection.path));
+    router.route("/c", () => count++);
+    const declared: RouteHandler = (connection) => {
+      count += connection.path.length;
+    };
+    router.route("/d", declared);
+
+    // @ts-expect-error an async handler would lose messages while it awaits
+    router.route("/e", async (connection) => {
+      await Promise.resolve();
+      count += connection.path.length;
+    });
+    // @ts-expect-error the exported type rejects an async handler too
+    const declaredAsync: RouteHandler = async (connection) => {
+      await Promise.resolve();
+      count += connection.path.length;
+    };
+    router.route("/f", declaredAsync);
+    assert.equal(count, 0);
   });
 });
 
