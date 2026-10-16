@@ -7,7 +7,8 @@ export const PERMESSAGE_DEFLATE = "permessage-deflate";
 
 /**
  * Settings for the permessage-deflate extension (RFC 7692). The server_ and
- * client_ prefixes say which side's compressor a setting applies to.
+ * client_ prefixes say which side's compressor a setting applies to. A
+ * server answers with them; a client puts them in its offer.
  */
 export interface PerMessageDeflateOptions {
   /**
@@ -17,24 +18,28 @@ export interface PerMessageDeflateOptions {
   threshold?: number;
   /**
    * The server starts every message it sends with an empty window
-   * ("server_no_context_takeover"). It compresses less well but the server
-   * doesn't keep a window between messages.
+   * ("server_no_context_takeover"). It compresses less well, but neither
+   * side keeps that window between messages. A client asks for it and fails
+   * the connection if the server doesn't agree.
    */
   serverNoContextTakeover?: boolean;
   /**
-   * Asks the client to start every message with an empty window
-   * ("client_no_context_takeover").
+   * The client starts every message it sends with an empty window
+   * ("client_no_context_takeover"). A server asks the client for it; a client
+   * promises it in its offer.
    */
   clientNoContextTakeover?: boolean;
   /**
    * The largest window, as a power of 2 from 8 to 15, the server compresses
-   * with ("server_max_window_bits"). Defaults to 15, 32 KiB.
+   * with ("server_max_window_bits"). Unset means 15, 32 KiB. A client asks
+   * for it and fails the connection if the answer leaves it out or gives a
+   * larger value (RFC 7692 section 7.1.2.1).
    */
   serverMaxWindowBits?: number;
   /**
-   * The largest window, as a power of 2 from 8 to 15, the client may compress
-   * with ("client_max_window_bits"). An offer from a client that can't be
-   * limited is declined. Unset by default, so the client may use 32 KiB.
+   * The largest window, as a power of 2 from 8 to 15, the client compresses
+   * with ("client_max_window_bits"). Unset means 15, 32 KiB. A server
+   * declines an offer from a client that can't be limited.
    */
   clientMaxWindowBits?: number;
 }
@@ -221,49 +226,82 @@ export function negotiatePerMessageDeflate(
   return undefined;
 }
 
+/** The parameters of one permessage-deflate element, as written in it. */
+interface ElementParams {
+  serverNoContextTakeover: boolean;
+  clientNoContextTakeover: boolean;
+  serverMaxWindowBits?: number;
+  // true when an offer has it without a value
+  clientMaxWindowBits?: number | true;
+}
+
+/**
+ * Reads the parameters of a permessage-deflate offer or answer. Throws an
+ * Error that names the problem for an unknown or repeated parameter or an
+ * invalid value; a server then declines the offer and a client fails the
+ * connection (RFC 7692 section 7). Only an offer may have
+ * client_max_window_bits without a value (RFC 7692 section 7.1.2.2).
+ */
+function readElementParams(
+  element: Extension,
+  kind: "offer" | "answer",
+): ElementParams {
+  const seen = new Set<string>();
+  const result: ElementParams = {
+    serverNoContextTakeover: false,
+    clientNoContextTakeover: false,
+  };
+
+  for (const [name, value] of element.params) {
+    if (seen.has(name)) throw new Error(`${name} appears more than once`);
+    seen.add(name);
+    const invalid = () => new Error(`invalid value for ${name}`);
+
+    switch (name) {
+      case "server_no_context_takeover":
+      case "client_no_context_takeover":
+        if (value !== true) throw invalid();
+        result[
+          name === "server_no_context_takeover"
+            ? "serverNoContextTakeover"
+            : "clientNoContextTakeover"
+        ] = true;
+        break;
+      case "server_max_window_bits":
+        result.serverMaxWindowBits = parseWindowBits(value);
+        if (result.serverMaxWindowBits === undefined) throw invalid();
+        break;
+      case "client_max_window_bits":
+        if (value === true && kind === "offer") {
+          result.clientMaxWindowBits = true;
+        } else {
+          result.clientMaxWindowBits = parseWindowBits(value);
+          if (result.clientMaxWindowBits === undefined) throw invalid();
+        }
+        break;
+      default:
+        throw new Error(`unknown permessage-deflate parameter ${name}`);
+    }
+  }
+
+  return result;
+}
+
 /** Accepts one offer, or returns undefined to decline it (RFC 7692 section 7). */
 function acceptOffer(
   offer: Extension,
   options: ResolvedPerMessageDeflateOptions,
 ): PerMessageDeflateParams | undefined {
-  const seen = new Set<string>();
-  let serverNoContextTakeover = false;
-  let serverMaxWindowBits: number | undefined;
-  // true when offered without a value
-  let clientMaxWindowBits: number | true | undefined;
-
-  for (const [name, value] of offer.params) {
-    // a server must decline an offer with a parameter twice, an unknown
-    // parameter or an invalid value (RFC 7692 section 7)
-    if (seen.has(name)) return undefined;
-    seen.add(name);
-
-    switch (name) {
-      case "server_no_context_takeover":
-        if (value !== true) return undefined;
-        serverNoContextTakeover = true;
-        break;
-      case "client_no_context_takeover":
-        // only a hint that the client won't take over its window
-        // (RFC 7692 section 7.1.1.2)
-        if (value !== true) return undefined;
-        break;
-      case "server_max_window_bits":
-        serverMaxWindowBits = parseWindowBits(value);
-        if (serverMaxWindowBits === undefined) return undefined;
-        break;
-      case "client_max_window_bits":
-        if (value === true) {
-          clientMaxWindowBits = true;
-        } else {
-          clientMaxWindowBits = parseWindowBits(value);
-          if (clientMaxWindowBits === undefined) return undefined;
-        }
-        break;
-      default:
-        return undefined;
-    }
+  let offered: ElementParams;
+  try {
+    offered = readElementParams(offer, "offer");
+  } catch {
+    return undefined;
   }
+  // client_no_context_takeover in an offer is only a hint that the client
+  // won't take over its window (RFC 7692 section 7.1.1.2)
+  const { serverNoContextTakeover, serverMaxWindowBits, clientMaxWindowBits } =
+    offered;
 
   const params: PerMessageDeflateParams = {
     // a requested server_no_context_takeover is accepted by repeating it
@@ -312,6 +350,110 @@ export function formatPerMessageDeflate(params: PerMessageDeflateParams) {
     value += `; client_max_window_bits=${params.clientMaxWindowBits}`;
   }
   return value;
+}
+
+/**
+ * Formats the client's offer (RFC 7692 section 7.1). It always includes
+ * client_max_window_bits, which tells the server it may limit the client's
+ * window.
+ */
+export function formatPerMessageDeflateOffer(
+  options: ResolvedPerMessageDeflateOptions,
+) {
+  let offer = PERMESSAGE_DEFLATE;
+  // a promise that the client won't take over its window
+  if (options.clientNoContextTakeover) offer += "; client_no_context_takeover";
+  if (options.serverNoContextTakeover) offer += "; server_no_context_takeover";
+  if (options.serverMaxWindowBits !== undefined) {
+    offer += `; server_max_window_bits=${options.serverMaxWindowBits}`;
+  }
+  offer += "; client_max_window_bits";
+  if (options.clientMaxWindowBits !== undefined) {
+    offer += `=${options.clientMaxWindowBits}`;
+  }
+  return offer;
+}
+
+/**
+ * Checks the server's Sec-WebSocket-Extensions answer to the offer made with
+ * `options` and returns the agreed parameters as the client applies them.
+ * Throws an Error that says what is wrong when the client must fail the
+ * connection: an extension it didn't offer, an unknown or repeated
+ * parameter, an invalid value, or an answer that ignores what the client
+ * asked for (RFC 7692 sections 5 and 7).
+ */
+export function acceptPerMessageDeflateResponse(
+  header: string,
+  options: ResolvedPerMessageDeflateOptions,
+): PerMessageDeflateParams {
+  const extensions = parseExtensions(header);
+  if (extensions.some((extension) => extension.name !== PERMESSAGE_DEFLATE)) {
+    throw new Error("Server chose an extension the client did not ask for");
+  }
+  const [element] = extensions;
+  if (!element) {
+    throw new Error("Server answered with an empty Sec-WebSocket-Extensions");
+  }
+  if (extensions.length > 1) {
+    throw new Error("Server answered with more than one extension");
+  }
+
+  let answered: ElementParams;
+  try {
+    answered = readElementParams(element, "answer");
+  } catch (error) {
+    throw new Error(
+      `Invalid permessage-deflate answer: ${(error as Error).message}`,
+    );
+  }
+  const {
+    serverNoContextTakeover,
+    clientNoContextTakeover,
+    serverMaxWindowBits,
+  } = answered;
+  // an answer always gives client_max_window_bits a value
+  const clientMaxWindowBits = answered.clientMaxWindowBits as
+    | number
+    | undefined;
+
+  // what the client asked for of the server has to be in the answer (RFC
+  // 7692 sections 7.1.1.1 and 7.1.2.1)
+  if (options.serverNoContextTakeover && !serverNoContextTakeover) {
+    throw new Error("Server didn't accept server_no_context_takeover");
+  }
+  if (options.serverMaxWindowBits !== undefined) {
+    if (serverMaxWindowBits === undefined) {
+      throw new Error(
+        `Server didn't accept server_max_window_bits=${options.serverMaxWindowBits}`,
+      );
+    }
+    if (serverMaxWindowBits > options.serverMaxWindowBits) {
+      throw new Error(
+        `Server answered server_max_window_bits=${serverMaxWindowBits}, ` +
+          `more than the ${options.serverMaxWindowBits} asked for`,
+      );
+    }
+  }
+
+  const params: PerMessageDeflateParams = {
+    serverNoContextTakeover,
+    // the client keeps what it promised in its offer, whatever the answer
+    clientNoContextTakeover:
+      clientNoContextTakeover || options.clientNoContextTakeover,
+  };
+  if (serverMaxWindowBits !== undefined) {
+    params.serverMaxWindowBits = serverMaxWindowBits;
+  }
+  if (
+    clientMaxWindowBits !== undefined ||
+    options.clientMaxWindowBits !== undefined
+  ) {
+    params.clientMaxWindowBits = Math.min(
+      clientMaxWindowBits ?? MAX_WINDOW_BITS,
+      options.clientMaxWindowBits ?? MAX_WINDOW_BITS,
+    );
+  }
+  return params;
 }
 
 /** A message inflated past the size limit. */
