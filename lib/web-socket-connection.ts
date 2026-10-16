@@ -142,7 +142,7 @@ export class WebSocketConnection extends EventEmitter {
     });
   }
 
-  private sendPingFrame(message: string) {
+  private sendPingFrame(message: Buffer) {
     const pingFrame = new WebSocketFrame();
     pingFrame
       .setFin(1)
@@ -153,7 +153,7 @@ export class WebSocketConnection extends EventEmitter {
     this.sendFrame(pingFrame);
   }
 
-  private sendPongFrame(message: string) {
+  private sendPongFrame(message: Buffer) {
     const pongFrame = new WebSocketFrame();
     pongFrame
       .setFin(1)

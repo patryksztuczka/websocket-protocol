@@ -67,7 +67,7 @@ export class WebSocketRequest extends EventEmitter {
         `Sec-WebSocket-Accept: ${this.generateWebSocketAccept(this.websocketKey)}\r\n` +
         `\r\n`,
       "ascii",
-      (err) => {
+      (_err) => {
         // handle error
       },
     );

@@ -9,8 +9,8 @@ const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 export class WebSocketClient extends EventEmitter {
   private req: ClientRequest | null = null;
-  private websocketKey: string;
-  private socket: Socket;
+  private websocketKey!: string;
+  private socket!: Socket;
 
   constructor() {
     super();

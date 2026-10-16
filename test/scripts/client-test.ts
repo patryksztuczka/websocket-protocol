@@ -6,7 +6,7 @@ const client = new WebSocketClient();
 client.connect();
 
 client.on("connect", (connection: WebSocketConnection) => {
-  connection.send("Hello world");
+  connection.send("text", "Hello world");
 });
 
 client.on("connectionFailed", (err) => {
