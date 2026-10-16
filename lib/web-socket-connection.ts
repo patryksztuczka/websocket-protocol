@@ -172,12 +172,7 @@ export class WebSocketConnection extends EventEmitter {
 
   private sendCloseFrame(status: number) {
     const closeFrame = new WebSocketFrame();
-    closeFrame
-      .setFin(1)
-      .setRsv(0x000)
-      .setOpcode(0x8)
-      .setMasked(0)
-      .setStatus(status);
+    closeFrame.setFin(1).setRsv(0x000).setOpcode(0x8).setStatus(status);
 
     this.sendFrame(closeFrame, () => {
       this.socket.destroy();
@@ -186,16 +181,14 @@ export class WebSocketConnection extends EventEmitter {
 
   private sendPongFrame(message: Buffer) {
     const pongFrame = new WebSocketFrame();
-    pongFrame
-      .setFin(1)
-      .setRsv(0x000)
-      .setOpcode(0xa)
-      .setMasked(0)
-      .setTextPayload(message);
+    pongFrame.setFin(1).setRsv(0x000).setOpcode(0xa).setTextPayload(message);
     this.sendFrame(pongFrame);
   }
 
   private sendFrame(frame: WebSocketFrame, cb?: () => void) {
+    // every frame a client sends is masked, every frame a server sends is not
+    // (RFC 6455 section 5.1)
+    frame.setMasked(this.role === "client" ? 1 : 0);
     this.socket.write(frame.toBuffer(), () => {
       if (cb) cb();
     });
@@ -204,7 +197,7 @@ export class WebSocketConnection extends EventEmitter {
   public send(type: "text" | "binary", message: string | Buffer) {
     const frame = new WebSocketFrame();
 
-    frame.setFin(1).setRsv(0x000).setMasked(0);
+    frame.setFin(1).setRsv(0x000);
 
     if (type === "text") {
       frame.setOpcode(0x1).setTextPayload(message);
