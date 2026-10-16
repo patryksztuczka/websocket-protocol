@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import type { ReceiveBuffer } from "./receive-buffer.ts";
 
 type ParseState =
@@ -241,38 +243,52 @@ export class WebSocketFrame {
     return this;
   }
 
+  /**
+   * Encodes the frame for sending. When the frame is masked, a fresh random
+   * masking key is made on every call and the payload is masked into a new
+   * buffer, so the buffer passed to setTextPayload/setBinaryPayload is left
+   * unchanged (RFC 6455 sections 5.2 and 5.3).
+   */
   public toBuffer(): Buffer {
     const firstByte = (this.fin << 7) | (this.rsv << 4) | this.opcode;
 
-    let secondByte = 0x00;
-
+    // 7-bit length, or 126/127 followed by a 16/64-bit length (RFC 6455 section 5.2)
+    let lengthField: number;
+    let extendedLength: number;
     if (this.payloadLength <= 125) {
-      secondByte = (this.masked << 7) | (this.payloadLength << 0);
+      lengthField = this.payloadLength;
+      extendedLength = 0;
     } else if (this.payloadLength <= 65535) {
-      secondByte = (this.masked << 7) | (0b01111110 << 0);
-    } else if (this.payloadLength <= 18446744073709551615) {
-      secondByte = (this.masked << 7) | (0b01111111 << 0);
+      lengthField = 126;
+      extendedLength = 2;
+    } else {
+      lengthField = 127;
+      extendedLength = 8;
     }
 
-    let extendedLenBuf = undefined;
-
-    if (this.payloadLength > 125 && this.payloadLength <= 65535) {
-      extendedLenBuf = Buffer.alloc(2);
-      extendedLenBuf.writeUInt16BE(this.payloadLength);
-    } else if (
-      this.payloadLength > 65535 &&
-      this.payloadLength <= 18446744073709551615
-    ) {
-      extendedLenBuf = Buffer.alloc(8);
-      extendedLenBuf.writeBigUInt64BE(BigInt(this.payloadLength));
+    const maskOffset = 2 + extendedLength;
+    const header = Buffer.alloc(maskOffset + (this.masked ? 4 : 0));
+    header[0] = firstByte;
+    header[1] = (this.masked << 7) | lengthField;
+    if (extendedLength === 2) {
+      header.writeUInt16BE(this.payloadLength, 2);
+    } else if (extendedLength === 8) {
+      header.writeBigUInt64BE(BigInt(this.payloadLength), 2);
     }
 
-    return Buffer.concat([
-      Buffer.from([firstByte, secondByte]),
-      extendedLenBuf ?? Buffer.alloc(0),
-      this.textPayload,
-      this.binaryPayload,
-    ]);
+    // Buffer.concat copies, so masking `frame` leaves the caller's payload alone
+    const frame = Buffer.concat([header, this.textPayload, this.binaryPayload]);
+
+    if (this.masked) {
+      // a new, unpredictable key for every frame (RFC 6455 sections 5.3 and 10.3)
+      this.maskingKey = randomBytes(4);
+      this.maskingKey.copy(frame, maskOffset);
+      for (let i = 0; i < this.payloadLength; i++) {
+        frame[header.length + i] ^= this.maskingKey[i % 4];
+      }
+    }
+
+    return frame;
   }
 
   public toString(): string {
