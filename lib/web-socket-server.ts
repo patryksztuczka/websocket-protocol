@@ -2,7 +2,7 @@ import EventEmitter from "node:events";
 import type { IncomingMessage, Server } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 
-import { WebSocketRequest } from "./web-socket-request.ts";
+import { HandshakeError, WebSocketRequest } from "./web-socket-request.ts";
 import type {
   WebSocketConnection,
   WebSocketConnectionOptions,
@@ -40,7 +40,9 @@ export class WebSocketServer extends EventEmitter {
     try {
       wsRequest.readRequest();
     } catch (error) {
-      wsRequest.rejectRequest(error);
+      // readRequest() only throws HandshakeError; anything else is a bug
+      if (!(error instanceof HandshakeError)) throw error;
+      wsRequest.reject(error.status, error.message);
       return;
     }
 

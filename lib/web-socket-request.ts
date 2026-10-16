@@ -19,13 +19,11 @@ const WEBSOCKET_VERSION = "13";
 // 22 base64 characters followed by "==" padding.
 const KEY_REGEX = /^[A-Za-z0-9+/]{22}==$/;
 
-// A handshake check that failed, or a request the app refused, with the HTTP
-// status to reply with: 400 for a broken handshake, 426 for an unsupported
-// version, or any 4xx or 5xx an app passes to reject(), such as 404.
+// A handshake check that failed, with the HTTP status to reply with.
 export class HandshakeError extends Error {
-  public status: number;
+  public status: 400 | 426;
 
-  constructor(message: string, status = 400) {
+  constructor(message: string, status: 400 | 426 = 400) {
     super(message);
     this.status = status;
   }
@@ -34,11 +32,17 @@ export class HandshakeError extends Error {
 export interface WebSocketRequestEvents {
   /** The request was accepted and the connection is open. */
   accept: [connection: WebSocketConnection];
+  /**
+   * The client closed the TCP connection before the request was answered, so
+   * there is no one left to answer. Never emitted once it has been answered.
+   */
+  close: [];
 }
 
 /**
  * A client's opening handshake. The server checks it with readRequest(), then
- * it is answered with accept() or reject(), exactly once.
+ * it is answered with accept() or reject(), exactly once. If the client goes
+ * away first, the request emits "close" and both become no-ops.
  */
 export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
   /** The path the client asked for, without the query, e.g. "/rooms/42". */
@@ -52,6 +56,8 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
   private websocketKey: string | undefined;
   private connectionOptions: WebSocketConnectionOptions;
   private isAnswered = false;
+  // set once the client has ended or closed the TCP connection before an answer
+  private clientGone = false;
 
   constructor(
     request: IncomingMessage,
@@ -74,14 +80,44 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
     this.headers = request.headers;
 
     // Node's HTTP server stops listening to the socket once it hands it over
-    // for an upgrade. Without a listener, a client that resets the connection
-    // while the app decides would crash the process; "close" follows anyway.
+    // for an upgrade, so watch it until the request is answered. Without an
+    // "error" listener a client that resets the connection would crash the
+    // process; "close" follows the error.
     this.socket.on("error", () => {});
+    this.socket.on("end", this.handleSocketEnd);
+    this.socket.on("close", this.handleSocketClose);
   }
 
   /** Whether the request has been accepted or rejected. */
   public get answered() {
     return this.isAnswered;
+  }
+
+  /**
+   * Whether the client ended or closed the TCP connection before the request
+   * was answered. accept() and reject() do nothing once this is true.
+   */
+  public get closed() {
+    return this.clientGone;
+  }
+
+  // The client ended its side before an answer. The upgrade socket allows
+  // half-open connections, so end ours too or nothing ever closes it.
+  private handleSocketEnd = () => {
+    this.clientGone = true;
+    this.socket.end();
+  };
+
+  private handleSocketClose = () => {
+    this.clientGone = true;
+    this.emit("close");
+  };
+
+  // Once the request is answered, the connection, or the rejection, takes
+  // care of the socket.
+  private stopWatchingSocket() {
+    this.socket.off("end", this.handleSocketEnd);
+    this.socket.off("close", this.handleSocketClose);
   }
 
   // Checks the opening handshake against RFC 6455 4.2.1.
@@ -145,16 +181,21 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
 
   /**
    * Answers with 101 Switching Protocols (RFC 6455 4.2.2), emits "accept" and
-   * returns the open connection. Throws if the request has already been
-   * answered.
+   * returns the open connection. Returns undefined, and opens nothing, if the
+   * client has already gone (see `closed`). Throws if the request has already
+   * been answered.
    */
-  public accept() {
+  public accept(): WebSocketConnection | undefined {
     if (!this.websocketKey) {
       throw new Error(
         "The request must pass readRequest before it can be accepted",
       );
     }
-    this.markAnswered();
+    this.assertUnanswered();
+    // also covers a socket that closed before its "close" event has run
+    if (this.clientGone || !this.socket.writable) return undefined;
+    this.isAnswered = true;
+    this.stopWatchingSocket();
 
     this.socket.write(
       `HTTP/1.1 101 Switching Protocols\r\n` +
@@ -168,8 +209,8 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
     const connection = new WebSocketConnection(
       this.socket,
       "server",
-      this.connectionOptions,
       { path: this.path, query: this.query, headers: this.headers },
+      this.connectionOptions,
     );
 
     this.emit("accept", connection);
@@ -180,25 +221,21 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
    * Refuses the connection before it opens: answers with `status`, which must
    * be 4xx or 5xx, and `reason` as a plain-text body, then closes the TCP
    * connection (RFC 6455 4.2.2). `reason` defaults to the status text, such
-   * as "Not Found". Throws if the request has already been answered.
+   * as "Not Found". Does nothing if the client has already gone (see
+   * `closed`). Throws if the request has already been answered.
    */
   public reject(status: number, reason?: string) {
     if (!Number.isInteger(status) || status < 400 || status > 599) {
       throw new RangeError(`Status ${status} can't reject a request`);
     }
-    this.rejectRequest(
-      new HandshakeError(reason ?? STATUS_CODES[status] ?? "Error", status),
-    );
-  }
+    this.assertUnanswered();
+    if (this.clientGone || !this.socket.writable) return;
+    this.isAnswered = true;
+    this.stopWatchingSocket();
 
-  // Replies with an HTTP error and closes the connection (RFC 6455 4.2.2).
-  public rejectRequest(error: unknown) {
-    this.markAnswered();
-
-    const status = error instanceof HandshakeError ? error.status : 400;
-    const body = error instanceof Error ? error.message : "Bad Request";
-
-    let headers = `Connection: close\r\n` + `Content-Type: text/plain\r\n`;
+    const body = reason ?? STATUS_CODES[status] ?? "Error";
+    let headers =
+      `Connection: close\r\n` + `Content-Type: text/plain; charset=utf-8\r\n`;
 
     if (status === 426) {
       headers +=
@@ -207,6 +244,8 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
     }
 
     this.socket.once("finish", () => this.socket.destroy());
+    // the reason can be any text, so it is sent as UTF-8, which is also what
+    // Content-Length counts
     this.socket.end(
       `HTTP/1.1 ${status} ${STATUS_CODES[status] ?? "Error"}\r\n` +
         headers +
@@ -217,11 +256,10 @@ export class WebSocketRequest extends EventEmitter<WebSocketRequestEvents> {
     );
   }
 
-  private markAnswered() {
+  private assertUnanswered() {
     if (this.isAnswered) {
       throw new Error("The request has already been answered");
     }
-    this.isAnswered = true;
   }
 
   private generateWebSocketAccept(key: string) {

@@ -102,12 +102,8 @@ export class WebSocketConnection extends EventEmitter {
   constructor(
     socket: Socket,
     role: WebSocketRole,
+    handshake: WebSocketHandshakeInfo,
     options: WebSocketConnectionOptions = {},
-    handshake: WebSocketHandshakeInfo = {
-      path: "/",
-      query: new URLSearchParams(),
-      headers: {},
-    },
   ) {
     super();
     this.path = handshake.path;

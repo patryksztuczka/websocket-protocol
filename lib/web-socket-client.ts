@@ -203,16 +203,11 @@ export class WebSocketClient extends EventEmitter {
     if (this.settled || !this.socket || !this.target) return;
     this.settled = true;
 
-    const connection = new WebSocketConnection(
-      this.socket,
-      "client",
-      {},
-      {
-        path: this.target.pathname,
-        query: new URLSearchParams(this.target.search),
-        headers: response.headers,
-      },
-    );
+    const connection = new WebSocketConnection(this.socket, "client", {
+      path: this.target.pathname,
+      query: new URLSearchParams(this.target.search),
+      headers: response.headers,
+    });
 
     // frames the server sent right after its answer can arrive in the same
     // packet; put them back so the connection reads them before anything else
