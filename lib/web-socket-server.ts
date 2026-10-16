@@ -9,6 +9,12 @@ import type {
 } from "./web-socket-connection.ts";
 import type { Socket } from "node:net";
 
+/**
+ * Emits "request" with a WebSocketRequest for every opening handshake that
+ * passed the checks of RFC 6455 4.2.1, so the app can accept() or reject() it.
+ * Without a "request" listener every such request is accepted. Emits
+ * "connect" with the WebSocketConnection of every accepted request.
+ */
 export class WebSocketServer extends EventEmitter {
   private httpServer: Server | HttpsServer;
   private connections: WebSocketConnection[] = [];
@@ -38,13 +44,24 @@ export class WebSocketServer extends EventEmitter {
       return;
     }
 
-    const connection = wsRequest.acceptRequest();
-
-    this.emit("connect", connection);
-    this.connections.push(connection);
-    // forget the connection once it has closed
-    socket.once("close", () => {
-      this.connections = this.connections.filter((c) => c !== connection);
+    // the app may answer later, so the connection is added whenever it is
+    // accepted rather than right here
+    wsRequest.once("accept", (connection) => {
+      this.emit("connect", connection);
+      this.connections.push(connection);
+      // forget the connection once it has closed
+      socket.once("close", () => {
+        this.connections = this.connections.filter((c) => c !== connection);
+      });
     });
+
+    // apps that don't listen to "request" get every valid request accepted,
+    // as before the event existed
+    if (this.listenerCount("request") === 0) {
+      wsRequest.accept();
+      return;
+    }
+
+    this.emit("request", wsRequest);
   }
 }
