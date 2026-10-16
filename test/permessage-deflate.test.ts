@@ -34,6 +34,24 @@ const DEFAULT_PARAMS: PerMessageDeflateParams = {
 const hex = (bytes: string) => Buffer.from(bytes.replace(/ /g, ""), "hex");
 
 /**
+ * `length` bytes made of one block of `period` pseudo-random bytes repeated.
+ * The same `seed` always gives the same bytes. The block itself has no
+ * repeats, so the only matches are exactly `period` bytes back.
+ */
+function repeated(period: number, length: number, seed: number) {
+  const block = Buffer.alloc(period);
+  let state = seed;
+  for (let i = 0; i < period; i++) {
+    // a linear congruential generator (Numerical Recipes constants)
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    block[i] = state >>> 24;
+  }
+  const data = Buffer.alloc(length);
+  for (let i = 0; i < length; i += period) block.copy(data, i);
+  return data;
+}
+
+/**
  * Inflates `messages` one after another with a strict window of
  * 2^windowBits bytes: one input byte at a time into a 64-byte output buffer,
  * so a back-reference further than the window can't be served from the output
@@ -412,35 +430,36 @@ describe("PerMessageDeflate", () => {
   test("server_max_window_bits=8 output decodes with a strict 256-byte window", async () => {
     // Node turns raw deflate windowBits 8 into 9, but zlib never refers more
     // than 2^9 - 262 = 250 bytes back with that window, which fits in 256
+    // seeded data, so every run compresses the same way: a block repeated
+    // every 200 bytes is in reach of a 256-byte window, one repeated every
+    // 300 bytes isn't
+    const near = repeated(200, 3000, 1);
+    const far = repeated(300, 3000, 2);
+
     const codec = new PerMessageDeflate(
       { ...DEFAULT_PARAMS, serverMaxWindowBits: 8 },
       "server",
     );
-    const messages: Buffer[] = [];
-    for (let m = 0; m < 30; m++) {
-      // repeats 200 to 510 bytes back, which a 512-byte window could use
-      const message = Buffer.alloc(3000);
-      randomBytes(510).copy(message);
-      for (let i = 510; i < message.length; i++) {
-        message[i] = message[i - 200 - ((i * 7) % 311)]!;
-      }
-      messages.push(message);
-    }
+    // several messages, so later ones may refer back into earlier ones
+    const messages = [near, far, repeated(200, 3000, 3), far, near];
     const compressed: Buffer[] = [];
     for (const message of messages) {
       compressed.push(await codec.compress(message));
     }
-    assert.deepEqual(await strictInflate(compressed, 8), messages);
     codec.close();
+    // it did refer back where the window allows...
+    assert.ok(compressed[0]!.length < near.length / 5);
+    // ...and not 300 bytes back, so the second message stays about its size
+    assert.ok(compressed[1]!.length > far.length * 0.9);
+    assert.deepEqual(await strictInflate(compressed, 8), messages);
 
-    // the check itself works: a 32 KiB window stream fails it
+    // the check itself works: with a 32 KiB window the same 300-byte repeat
+    // is referred to, and a 256-byte window can't follow it
     const wide = new PerMessageDeflate(DEFAULT_PARAMS, "server");
-    const wideCompressed: Buffer[] = [];
-    for (const message of messages) {
-      wideCompressed.push(await wide.compress(message));
-    }
-    await assert.rejects(strictInflate(wideCompressed, 8), /too far back/);
+    const wideFar = await wide.compress(far);
     wide.close();
+    assert.ok(wideFar.length < far.length / 5);
+    await assert.rejects(strictInflate([wideFar], 8), /too far back/);
   });
 
   test("close() fails compressions that are still waiting, and later ones", async () => {
