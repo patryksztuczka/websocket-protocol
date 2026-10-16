@@ -43,10 +43,7 @@ export class WebSocketConnection extends EventEmitter {
       return;
     }
 
-    // 4 is number of masking key bytes
-    this.buffer = Buffer.from(
-      [...this.buffer].slice(frame.toBuffer().length + 4),
-    );
+    this.buffer = this.buffer.subarray(frame.getFrameLength());
 
     switch (frame.getOpcode()) {
       case 0x0:
