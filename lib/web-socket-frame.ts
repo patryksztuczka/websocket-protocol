@@ -1,3 +1,7 @@
+import { randomBytes } from "node:crypto";
+
+import type { ReceiveBuffer } from "./receive-buffer.ts";
+
 type ParseState =
   | "DECODE_HEADER"
   | "WAITING_FOR_16_BIT_LENGTH"
@@ -8,6 +12,7 @@ type ParseState =
 
 type ParseError =
   | "PAYLOAD_TOO_LARGE"
+  | "MESSAGE_TOO_BIG"
   | "INVALID_PAYLOAD_LENGTH"
   | "RESERVED_BITS_USED"
   | "RESERVED_OPCODE_USED"
@@ -22,9 +27,6 @@ export class WebSocketFrame {
   private opcode: number = 0;
   private masked: number = 0;
   private payloadLength: number = 0;
-  // bytes before the payload: 2, plus 2 or 8 for the extended length,
-  // plus 4 for the masking key when the MASK bit is set
-  private headerLength: number = 2;
   private maskingKey: Buffer = Buffer.alloc(0);
   private textPayload: Buffer = Buffer.alloc(0);
   private binaryPayload: Buffer = Buffer.alloc(0);
@@ -35,14 +37,25 @@ export class WebSocketFrame {
   }
 
   /**
-   * Parses a frame from the start of `buffer`. `expectMasked` says whether the
-   * peer must mask its frames: true when reading frames from a client, false
-   * when reading frames from a server (RFC 6455 section 5.1).
+   * Reads the frame from `data`, taking each part (header, extended length,
+   * masking key, payload) only once all of its bytes have arrived. Returns
+   * false while the frame is incomplete; call it again with the same frame
+   * when more data arrives and it carries on where it stopped.
+   *
+   * `expectMasked` says whether the peer must mask its frames: true when
+   * reading frames from a client, false when reading frames from a server
+   * (RFC 6455 section 5.1). A data frame whose payload is longer than
+   * `maxPayloadLength` fails with "MESSAGE_TOO_BIG" before its payload is read.
    */
-  public addData(buffer: Buffer, expectMasked: boolean): boolean {
-    if (buffer.length < 2) return false;
+  public addData(
+    data: ReceiveBuffer,
+    expectMasked: boolean,
+    maxPayloadLength: number,
+  ): boolean {
     if (this.parseState === "DECODE_HEADER") {
-      const firstByte = buffer.readUInt8(0);
+      if (data.length < 2) return false;
+      const header = data.consume(2);
+      const firstByte = header.readUInt8(0);
       this.fin = (firstByte & 0b10000000) >> 7;
       this.rsv = (firstByte & 0b01110000) >> 4;
       this.opcode = firstByte & 0b00001111;
@@ -68,7 +81,7 @@ export class WebSocketFrame {
         return false;
       }
 
-      const secondByte = buffer.readUInt8(1);
+      const secondByte = header.readUInt8(1);
       this.masked = (secondByte & 0b10000000) >> 7;
 
       // a server must close the connection on an unmasked frame and a client
@@ -97,15 +110,14 @@ export class WebSocketFrame {
     }
 
     if (this.parseState === "WAITING_FOR_16_BIT_LENGTH") {
-      if (buffer.length < 4) return false;
-      this.payloadLength = buffer.readUInt16BE(2);
-      this.headerLength = 4;
+      if (data.length < 2) return false;
+      this.payloadLength = data.consume(2).readUInt16BE(0);
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
     if (this.parseState === "WAITING_FOR_64_BIT_LENGTH") {
-      if (buffer.length < 10) return false;
-      const length = buffer.readBigUInt64BE(2);
+      if (data.length < 8) return false;
+      const length = data.consume(8).readBigUInt64BE(0);
       // the most significant bit MUST be 0 (RFC 6455 section 5.2)
       if (length >> 63n !== 0n) {
         this.error = "INVALID_PAYLOAD_LENGTH";
@@ -113,11 +125,10 @@ export class WebSocketFrame {
       }
       // larger lengths can't be stored in a number without losing precision
       if (length > BigInt(Number.MAX_SAFE_INTEGER)) {
-        this.error = "PAYLOAD_TOO_LARGE";
+        this.error = "MESSAGE_TOO_BIG";
         return false;
       }
       this.payloadLength = Number(length);
-      this.headerLength = 10;
       this.parseState = "WAITING_FOR_MASK_KEY";
     }
 
@@ -126,57 +137,52 @@ export class WebSocketFrame {
         this.error = "PAYLOAD_TOO_LARGE";
         return false;
       }
+    } else if (this.payloadLength > maxPayloadLength) {
+      // refuse it before the payload is buffered (RFC 6455 section 7.4.1, 1009)
+      this.error = "MESSAGE_TOO_BIG";
+      return false;
     }
 
     if (this.parseState === "WAITING_FOR_MASK_KEY") {
       if (this.masked) {
-        if (buffer.length < this.headerLength + 4) return false;
-        this.maskingKey = buffer.subarray(
-          this.headerLength,
-          this.headerLength + 4,
-        );
-        this.headerLength += 4;
+        if (data.length < 4) return false;
+        this.maskingKey = data.consume(4);
       }
       this.parseState = "WAITING_FOR_PAYLOAD";
     }
 
     if (this.parseState === "WAITING_FOR_PAYLOAD") {
-      // wait until the whole frame has arrived
-      if (buffer.length >= this.headerLength + this.payloadLength) {
-        const payload = buffer.subarray(
-          this.headerLength,
-          this.headerLength + this.payloadLength,
-        );
+      // wait until the whole payload has arrived
+      if (data.length < this.payloadLength) return false;
 
-        // the payload is masked only when the MASK bit is set (RFC 6455 section 5.3)
-        const unmaskedPayload = Buffer.from(payload);
+      const payload = data.consume(this.payloadLength);
 
-        if (this.masked) {
-          for (let i = 0; i < this.payloadLength; i++) {
-            unmaskedPayload[i] ^= this.maskingKey[i % 4];
-          }
+      // the payload is masked only when the MASK bit is set (RFC 6455 section 5.3)
+      if (this.masked) {
+        for (let i = 0; i < this.payloadLength; i++) {
+          payload[i] ^= this.maskingKey[i % 4];
         }
-
-        if (this.opcode === 1) {
-          this.textPayload = unmaskedPayload;
-        } else if (this.opcode === 2) {
-          this.binaryPayload = unmaskedPayload;
-        } else {
-          this.textPayload = unmaskedPayload;
-        }
-
-        this.parseState = "COMPLETE";
-
-        return true;
       }
+
+      if (this.opcode === 1) {
+        this.textPayload = payload;
+      } else if (this.opcode === 2) {
+        this.binaryPayload = payload;
+      } else {
+        this.textPayload = payload;
+      }
+
+      this.parseState = "COMPLETE";
+
+      return true;
     }
 
     return false;
   }
 
-  /** Number of bytes the frame takes up on the wire, header included. */
-  public getFrameLength() {
-    return this.headerLength + this.payloadLength;
+  /** Length of the payload in bytes. */
+  public getPayloadLength() {
+    return this.payloadLength;
   }
 
   public getFin() {
@@ -212,7 +218,7 @@ export class WebSocketFrame {
   }
 
   public setTextPayload(message: string | Buffer) {
-    const payload = Buffer.from(message);
+    const payload = Buffer.isBuffer(message) ? message : Buffer.from(message);
     this.payloadLength = payload.length;
     this.textPayload = payload;
     return this;
@@ -223,7 +229,7 @@ export class WebSocketFrame {
   }
 
   public setBinaryPayload(message: string | Buffer) {
-    const payload = Buffer.from(message);
+    const payload = Buffer.isBuffer(message) ? message : Buffer.from(message);
     this.payloadLength = payload.length;
     this.binaryPayload = payload;
     return this;
@@ -237,41 +243,52 @@ export class WebSocketFrame {
     return this;
   }
 
+  /**
+   * Encodes the frame for sending. When the frame is masked, a fresh random
+   * masking key is made on every call and the payload is masked into a new
+   * buffer, so the buffer passed to setTextPayload/setBinaryPayload is left
+   * unchanged (RFC 6455 sections 5.2 and 5.3).
+   */
   public toBuffer(): Buffer {
     const firstByte = (this.fin << 7) | (this.rsv << 4) | this.opcode;
 
-    let secondByte = 0x00;
-
+    // 7-bit length, or 126/127 followed by a 16/64-bit length (RFC 6455 section 5.2)
+    let lengthField: number;
+    let extendedLength: number;
     if (this.payloadLength <= 125) {
-      secondByte = (this.masked << 7) | (this.payloadLength << 0);
+      lengthField = this.payloadLength;
+      extendedLength = 0;
     } else if (this.payloadLength <= 65535) {
-      secondByte = (this.masked << 7) | (0b01111110 << 0);
-    } else if (this.payloadLength <= 18446744073709551615) {
-      secondByte = (this.masked << 7) | (0b01111111 << 0);
+      lengthField = 126;
+      extendedLength = 2;
+    } else {
+      lengthField = 127;
+      extendedLength = 8;
     }
 
-    let extendedLenBuf = undefined;
-
-    if (this.payloadLength > 125 && this.payloadLength <= 65535) {
-      extendedLenBuf = Buffer.alloc(2);
-      extendedLenBuf.writeUInt16BE(this.payloadLength);
-    } else if (
-      this.payloadLength > 65535 &&
-      this.payloadLength <= 18446744073709551615
-    ) {
-      extendedLenBuf = Buffer.alloc(8);
-      extendedLenBuf.writeBigUInt64BE(BigInt(this.payloadLength));
+    const maskOffset = 2 + extendedLength;
+    const header = Buffer.alloc(maskOffset + (this.masked ? 4 : 0));
+    header[0] = firstByte;
+    header[1] = (this.masked << 7) | lengthField;
+    if (extendedLength === 2) {
+      header.writeUInt16BE(this.payloadLength, 2);
+    } else if (extendedLength === 8) {
+      header.writeBigUInt64BE(BigInt(this.payloadLength), 2);
     }
 
-    const buffer = Buffer.from([
-      firstByte,
-      secondByte,
-      ...(extendedLenBuf ?? []),
-      ...this.textPayload,
-      ...this.binaryPayload,
-    ]);
+    // Buffer.concat copies, so masking `frame` leaves the caller's payload alone
+    const frame = Buffer.concat([header, this.textPayload, this.binaryPayload]);
 
-    return buffer;
+    if (this.masked) {
+      // a new, unpredictable key for every frame (RFC 6455 sections 5.3 and 10.3)
+      this.maskingKey = randomBytes(4);
+      this.maskingKey.copy(frame, maskOffset);
+      for (let i = 0; i < this.payloadLength; i++) {
+        frame[header.length + i] ^= this.maskingKey[i % 4];
+      }
+    }
+
+    return frame;
   }
 
   public toString(): string {
