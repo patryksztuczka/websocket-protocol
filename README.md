@@ -29,6 +29,7 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 ## To Do
 
 ### ✔️ Completed
+
 - [x] **Initial Handshake** — Implemented the opening handshake logic as per RFC 6455.
 - [x] **Basic Framing** — Established the foundational structure for framing WebSocket messages.
 - [x] **Masking Support** — Added masking and unmasking for client-sent payloads.
@@ -38,6 +39,7 @@ By taking a low-level approach, the implementation aims to offer a clear, instru
 - [x] **Opcode Handling** — Properly differentiate and handle control and non-control opcodes.
 
 ### ⏳ In Progress / Planned
+
 - [ ] **Fragmentation Support** — Add support for fragmented messages.
 - [ ] **UTF-8 Validation** — Ensure all text frames contain valid UTF-8 as required by the spec.
 - [ ] **Connection Closure** — Handle connection teardown with appropriate status codes.
@@ -61,7 +63,7 @@ To run the test suite:
    ```bash
    cd ./test/autobahn
    ```
-   
+
 2. Execute the test runner script:
 
    ```bash
