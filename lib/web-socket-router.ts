@@ -31,14 +31,22 @@ export interface RouteContext {
 
 /**
  * Sets up a routed connection. It runs right after the 101, and the router
- * starts reading the connection as soon as it returns, so add listeners
- * before any `await`: messages that arrive while an async handler waits are
- * lost. Do async work, such as an auth check, before calling handle().
+ * starts reading the connection as soon as it returns, so an async handler
+ * would lose messages that arrive while it waits. route() therefore rejects
+ * handlers that return a promise (see NotAPromise). Do async work, such as an
+ * auth check, before calling handle().
  */
 export type RouteHandler = (
   connection: WebSocketConnection,
   context: RouteContext,
 ) => void;
+
+/**
+ * `R`, unless it is a promise. route() types its handler's return as this,
+ * so an `async` handler is a type error, while one that returns nothing, or
+ * anything that isn't a promise, is fine.
+ */
+export type NotAPromise<R> = R extends PromiseLike<unknown> ? never : R;
 
 // one segment of a pattern: matched exactly, or captured under a name
 type Segment = { literal: string } | { param: string };
@@ -54,10 +62,18 @@ interface Route {
  *
  * ```ts
  * server.on("request", async (request) => {
- *   if (!(await authorised(request))) return request.reject(401);
- *   router.handle(request);
+ *   try {
+ *     if (!(await authorised(request))) return request.reject(401);
+ *     router.handle(request);
+ *   } catch (error) {
+ *     // a route handler threw; its connection is already closed with 1011
+ *     console.error(error);
+ *   }
  * });
  * ```
+ *
+ * Without the try/catch, an error from a route handler would be an
+ * unhandled rejection of the async listener and stop the process.
  *
  * The first route whose pattern matches the path accepts the request and
  * gets the open connection. A path no route matches gets 404, so it never
@@ -77,7 +93,13 @@ export class WebSocketRouter {
    * Throws if the pattern doesn't start with "/", has a `:` without a name,
    * uses a name twice or isn't valid percent-encoding.
    */
-  public route(pattern: string, handler: RouteHandler) {
+  public route<R>(
+    pattern: string,
+    handler: (
+      connection: WebSocketConnection,
+      context: RouteContext,
+    ) => NotAPromise<R>,
+  ) {
     if (!pattern.startsWith("/")) {
       throw new Error(`A route pattern must start with /, got "${pattern}"`);
     }
@@ -112,8 +134,11 @@ export class WebSocketRouter {
    * route's handler, or rejects it with 404. Does nothing if the request has
    * already been answered or its client has gone.
    *
-   * If the handler throws, its connection is closed with 1011 (RFC 6455
-   * section 7.4.1) and handle() rethrows the error.
+   * If the handler, or a "connect" listener on the server, throws, the
+   * connection is closed with 1011 (RFC 6455 section 7.4.1), still read, and
+   * handle() rethrows the error. Catch it in the "request" listener; in an
+   * async listener an uncaught error becomes an unhandled rejection, which
+   * stops the process.
    */
   public handle(request: WebSocketRequest) {
     if (request.answered || request.closed) return;

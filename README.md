@@ -94,14 +94,23 @@ import { MessageRouter, WebSocketRouter } from "./lib/web-socket-router.ts";
 
 const router = new WebSocketRouter();
 
-wsServer.on("request", (request) => {
-  // auth first; this check could also await something before handle()
-  if (request.query.get("token") !== "secret") {
-    request.reject(401, "Missing or wrong token");
-    return;
+wsServer.on("request", async (request) => {
+  try {
+    // auth first; an async check is fine here, before handle()
+    if (!(await isAllowed(request.query.get("token")))) {
+      request.reject(401, "Missing or wrong token");
+      return;
+    }
+    router.handle(request);
+  } catch (error) {
+    // a route handler threw; its connection is already closed with 1011
+    console.error(error);
   }
-  router.handle(request);
 });
+
+async function isAllowed(token: string | null) {
+  return token === "secret";
+}
 
 router.route("/rooms/:id", (connection, { params, query }) => {
   // "/rooms/42?name=Ada" gives params.id "42" and query.get("name") "Ada"
@@ -124,8 +133,8 @@ router.route("/rooms/:id", (connection, { params, query }) => {
 
 - Routes are tried in the order they were added, and the first match wins. A `:name` segment matches one non-empty segment. The path and the pattern are compared after percent-decoding, so `/caf%C3%A9` matches `/café`. A param's value is decoded too, and `%2F` in it becomes `/`. A path no route matches gets `404 Not Found` and never a 101.
 - `handle()` does nothing if the request has already been answered or the client has left, for example while an auth check was awaiting.
-- The router accepts the request, calls the handler and then starts reading, so there is no need to call `addSocketEventListeners()`. Add listeners before any `await` in a handler. Messages that arrive while an async handler waits are lost, so do async work before `handle()`. `connect` still fires for every routed connection, before its handler.
-- If a route handler throws, the router closes that connection with 1011 and `handle()` rethrows the error. Catch it in the `request` listener to keep the process running.
+- The router accepts the request, calls the handler and then starts reading, so there is no need to call `addSocketEventListeners()`. A route handler must add its listeners before it returns, because messages that arrive while an async handler waits would be lost. That's why `route()` makes an `async` handler a type error. Do async work before `handle()`. `connect` still fires for every routed connection, before its handler.
+- If a route handler or a `connect` listener throws, that connection is closed with 1011 and still read, and `handle()` rethrows the error. Catch it in the `request` listener, as the example does. In an async listener, an uncaught error becomes an unhandled rejection and stops the process.
 - Each text message must be a JSON object with a string `type`. Anything else closes the connection with 1007, and later messages on it aren't routed. A type without a handler goes to the fallback, or is ignored if there is no fallback. Each type has one handler, so a second `on()` for the same type throws. `messages.send(type, data)` sends a message in the same shape. An error thrown by a message handler isn't caught.
 - Binary messages aren't routed. They still arrive through `binaryMessage`.
 
