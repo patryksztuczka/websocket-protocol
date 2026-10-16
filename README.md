@@ -73,7 +73,7 @@ The client is `WebSocketClient`. `client.connect("ws://127.0.0.1:8080/")` emits 
 
 ### Secure WebSockets (`wss://`)
 
-For `wss://`, attach the server to a `node:https` server instead. The client connects to `wss://` addresses on port 443 by default, and the `tls` option is passed on to `https.request`, for example `ca` to trust a self-signed certificate. A TLS error, such as an untrusted certificate, ends in `connectionFailed`.
+For `wss://`, attach the server to a `node:https` server instead. The client connects to `wss://` addresses on port 443 by default, and the `tls` option is passed on to `https.request`, for example `ca` to trust a self-signed certificate. A TLS error while connecting, such as an untrusted certificate or one that doesn't match `servername`, ends in `connectionFailed`. Invalid TLS options, such as a `cert` or `key` that can't be read or a `servername` that is an IP address, make `connect()` throw instead.
 
 ```ts
 import { readFileSync } from "node:fs";

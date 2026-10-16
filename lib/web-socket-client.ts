@@ -39,6 +39,8 @@ export class WebSocketClient extends EventEmitter {
    * Opens a connection to a `ws://host[:port]/path?query` or `wss://...`
    * address. Emits "connect" with a `WebSocketConnection`, which starts reading
    * messages by itself right after, or "connectionFailed" with the reason.
+   * Throws for an invalid address or invalid TLS options, such as a `cert`
+   * that can't be read or a `servername` that is an IP address.
    */
   public connect(url: string, options: WebSocketClientOptions = {}) {
     const target = new URL(url);
@@ -82,10 +84,18 @@ export class WebSocketClient extends EventEmitter {
       },
     };
 
-    // the TLS options go first so they can't replace the target or the headers;
-    // a TLS error such as an untrusted certificate comes in as a request error
+    // the TLS options go first, so they can't replace the method, host, port,
+    // path, agent or headers above; socketPath isn't a TLS option but would
+    // send the connection to a local socket instead, so it is cleared too.
+    // `lookup` still applies, so the caller can resolve the host name itself.
+    // A TLS error such as an untrusted certificate comes in as a request error,
+    // while invalid options such as a bad `cert` make https.request throw here
     this.req = secure
-      ? https.request({ ...options.tls, ...requestOptions })
+      ? https.request({
+          ...options.tls,
+          ...requestOptions,
+          socketPath: undefined,
+        })
       : http.request(requestOptions);
 
     this.req.on("upgrade", (res, socket, head) =>
