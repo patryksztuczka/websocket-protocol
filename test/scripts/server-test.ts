@@ -25,7 +25,7 @@ wsServer.on("connect", (connection: WebSocketConnection) => {
     connection.send("binary", message.payload);
   });
 
-  connection.on("end", () => {
-    console.log("Client ended connection");
+  connection.on("close", (code: number, reason: string) => {
+    console.log(`Connection closed with ${code} ${reason}`);
   });
 });
