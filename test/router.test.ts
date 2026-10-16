@@ -5,17 +5,25 @@
 /* oxlint-disable typescript/no-floating-promises */
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { createServer, type Server } from "node:http";
 import { after, before, describe, test } from "node:test";
 
 import type { WebSocketConnection } from "../lib/web-socket-connection.ts";
+import type { WebSocketRequest } from "../lib/web-socket-request.ts";
 import {
   MessageRouter,
   WebSocketRouter,
   type RouteContext,
+  type RouteParams,
 } from "../lib/web-socket-router.ts";
-import { WebSocketServer } from "../lib/web-socket-server.ts";
-import { connect, handshake, listen, nextText } from "./helpers.ts";
+import {
+  connect,
+  handshake,
+  nextText,
+  rawHandshake,
+  startServer,
+} from "./helpers.ts";
+
+type Server = Awaited<ReturnType<typeof startServer>>;
 
 type Routed = {
   name: string;
@@ -23,20 +31,22 @@ type Routed = {
   context: RouteContext;
 };
 
+/** Params as the router builds them: an object without a prototype. */
+function params(values: Record<string, string>): RouteParams {
+  return Object.assign(Object.create(null), values);
+}
+
 describe("WebSocketRouter", () => {
-  let httpServer: Server;
-  let wsServer: WebSocketServer;
-  let port: number;
-  let url: string;
+  let server: Server;
+  let router: WebSocketRouter;
   // every handler call, in order
   const routed: Routed[] = [];
   // every "connect" event, with how many handlers had run by then
   const connected: { connection: WebSocketConnection; handlers: number }[] = [];
 
   before(async () => {
-    httpServer = createServer();
-    wsServer = new WebSocketServer(httpServer);
-    wsServer.on("connect", (connection) =>
+    server = await startServer();
+    server.wsServer.on("connect", (connection) =>
       connected.push({ connection, handlers: routed.length }),
     );
 
@@ -46,41 +56,42 @@ describe("WebSocketRouter", () => {
       };
     };
 
-    new WebSocketRouter(wsServer)
+    router = new WebSocketRouter()
       .route("/rooms/lobby", record("lobby"))
       .route("/rooms/:id", record("room"))
       .route("/files/:folder/:name", record("file"))
+      .route("/café", record("café"))
+      .route("/proto/:__proto__", record("proto"))
       .route("/", record("root"));
 
-    port = await listen(httpServer);
-    url = `ws://127.0.0.1:${port}`;
+    server.wsServer.on("request", (request) => router.handle(request));
   });
 
   after(() => {
-    httpServer.close();
+    server.close();
   });
 
   /** Connects, waits for the route handler and returns its call. */
   async function open(path: string) {
-    const before = routed.length;
-    const client = await connect(url + path);
-    const call = routed[before];
+    const count = routed.length;
+    const client = await connect(server.url + path);
+    const call = routed[count];
     assert.ok(call, `no handler ran for ${path}`);
     return { client, ...call };
   }
 
   test("an unknown path gets 404 and never a 101", async () => {
-    const answer = await handshake(port, "/nowhere");
+    const answer = await handshake(server.port, "/nowhere");
     assert.equal(answer.status, 404);
-    assert.equal(answer.body, "Not Found");
+    assert.equal(answer.body.toString(), "Not Found");
 
-    await assert.rejects(connect(`${url}/nowhere`), /got status 404/);
+    await assert.rejects(connect(`${server.url}/nowhere`), /got status 404/);
   });
 
   test("/rooms/42 reaches its handler with { id: '42' }", async () => {
     const { client, name, connection, context } = await open("/rooms/42");
     assert.equal(name, "room");
-    assert.deepEqual(context.params, { id: "42" });
+    assert.deepEqual(context.params, params({ id: "42" }));
     assert.equal(connection.path, "/rooms/42");
     client.close();
   });
@@ -95,14 +106,17 @@ describe("WebSocketRouter", () => {
   test("the first matching route wins", async () => {
     const { client, name, context } = await open("/rooms/lobby");
     assert.equal(name, "lobby");
-    assert.deepEqual(context.params, {});
+    assert.deepEqual(context.params, params({}));
     client.close();
   });
 
   test("params are decoded and every segment has to match", async () => {
     const { client, name, context } = await open("/files/my%20docs/a.txt");
     assert.equal(name, "file");
-    assert.deepEqual(context.params, { folder: "my docs", name: "a.txt" });
+    assert.deepEqual(
+      context.params,
+      params({ folder: "my docs", name: "a.txt" }),
+    );
     client.close();
 
     for (const path of [
@@ -113,8 +127,33 @@ describe("WebSocketRouter", () => {
       // not valid percent-encoding, so it can't be decoded
       "/rooms/%E0%A4%A",
     ]) {
-      assert.equal((await handshake(port, path)).status, 404, path);
+      assert.equal((await handshake(server.port, path)).status, 404, path);
     }
+  });
+
+  test("%2F decodes to / inside a param", async () => {
+    const { client, context } = await open("/files/a%2Fb/c.txt");
+    assert.deepEqual(context.params, params({ folder: "a/b", name: "c.txt" }));
+    client.close();
+  });
+
+  test("literal segments match after decoding too", async () => {
+    // the client sends /café as /caf%C3%A9
+    const café = await open("/café");
+    assert.equal(café.name, "café");
+    café.client.close();
+
+    // %6C is "l", so this is /rooms/lobby and not a room called "%6Cobby"
+    const lobby = await open("/rooms/%6Cobby");
+    assert.equal(lobby.name, "lobby");
+    lobby.client.close();
+  });
+
+  test("a param can be called __proto__", async () => {
+    const { client, context } = await open("/proto/x");
+    assert.deepEqual(Object.keys(context.params), ["__proto__"]);
+    assert.equal(context.params["__proto__"], "x");
+    client.close();
   });
 
   test("/ matches only the root path", async () => {
@@ -143,47 +182,123 @@ describe("WebSocketRouter", () => {
     client.close();
   });
 
-  test("route() needs a pattern that starts with /", () => {
-    const router = new WebSocketRouter(new WebSocketServer(createServer()));
+  test("route() checks its pattern", () => {
+    const router = new WebSocketRouter();
     assert.throws(() => router.route("rooms/:id", () => {}), /start with \//);
+    assert.throws(
+      () => router.route("/files/:a/:a", () => {}),
+      /more than once/,
+    );
+    assert.throws(() => router.route("/files/:", () => {}), /needs a name/);
   });
 });
 
-describe("WebSocketRouter with a request listener for auth", () => {
-  test("a request the app rejected first never reaches the router", async () => {
-    const httpServer = createServer();
-    const wsServer = new WebSocketServer(httpServer);
-    // added before the router, so it runs first
-    wsServer.on("request", (request) => {
-      if (request.query.get("token") !== "secret") request.reject(401);
+describe("WebSocketRouter.handle() in the app's request listener", () => {
+  let server: Server;
+  let handled: string[];
+  let router: WebSocketRouter;
+  // the app's request listener, set per test
+  let listener: (request: WebSocketRequest) => void;
+
+  before(async () => {
+    server = await startServer();
+    router = new WebSocketRouter().route("/chat", (connection) => {
+      handled.push(connection.query.get("token") ?? "");
     });
-    let handled = 0;
-    new WebSocketRouter(wsServer).route("/chat", () => handled++);
-    const port = await listen(httpServer);
+    server.wsServer.on("request", (request) => listener(request));
+  });
 
-    const answer = await handshake(port, "/chat?token=wrong");
+  after(() => {
+    server.close();
+  });
+
+  test("an async auth check runs before the router, which never sees a rejected request", async () => {
+    handled = [];
+    listener = async (request) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (request.query.get("token") !== "secret") {
+        request.reject(401);
+        return;
+      }
+      router.handle(request);
+    };
+
+    const answer = await handshake(server.port, "/chat?token=wrong");
     assert.equal(answer.status, 401);
-    assert.equal(handled, 0);
+    assert.deepEqual(handled, []);
 
-    const client = await connect(`ws://127.0.0.1:${port}/chat?token=secret`);
-    assert.equal(handled, 1);
+    const client = await connect(`${server.url}/chat?token=secret`);
+    assert.deepEqual(handled, ["secret"]);
     client.close();
-    httpServer.close();
+  });
+
+  test("handle() does nothing with a request that is already answered", async () => {
+    handled = [];
+    const errors: unknown[] = [];
+    listener = (request) => {
+      request.reject(403);
+      try {
+        router.handle(request);
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+
+    assert.equal((await handshake(server.port, "/chat")).status, 403);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(handled, []);
+  });
+
+  test("handle() does nothing once the client has gone", async () => {
+    handled = [];
+    const requested = new Promise<WebSocketRequest>((resolve) => {
+      listener = resolve;
+    });
+    const client = await rawHandshake(server.port, "/chat");
+    const request = await requested;
+
+    const closed = once(request, "close");
+    client.end();
+    await closed;
+    router.handle(request);
+    assert.equal(request.answered, false);
+    assert.deepEqual(handled, []);
+  });
+
+  test("a handler that throws closes its connection with 1011, and handle() rethrows", async () => {
+    const failing = new WebSocketRouter().route("/chat", () => {
+      throw new Error("handler failed");
+    });
+    const errors: unknown[] = [];
+    listener = (request) => {
+      try {
+        failing.handle(request);
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+
+    const client = await connect(`${server.url}/chat`);
+    const started = Date.now();
+    const [code] = await once(client, "close");
+    assert.equal(code, 1011);
+    assert.match(String(errors[0]), /handler failed/);
+    // the server read the client's close frame and closed the TCP
+    // connection, rather than waiting out the 5 s close timeout
+    assert.ok(Date.now() - started < 1000);
   });
 });
 
 describe("MessageRouter", () => {
-  let httpServer: Server;
-  let url: string;
+  let server: Server;
   // what the server's handlers received, as [handler, type, data]
   const received: [string, string, unknown][] = [];
   // set by a test to watch the next server connection
   let onConnection: ((connection: WebSocketConnection) => void) | undefined;
 
   before(async () => {
-    httpServer = createServer();
-    const wsServer = new WebSocketServer(httpServer);
-    const router = new WebSocketRouter(wsServer);
+    server = await startServer();
+    const router = new WebSocketRouter();
 
     // a room where "join" and "say" have handlers and the rest goes to the fallback
     router.route("/rooms/:id", (connection, { params }) => {
@@ -207,11 +322,11 @@ describe("MessageRouter", () => {
       );
     });
 
-    url = `ws://127.0.0.1:${await listen(httpServer)}`;
+    server.wsServer.on("request", (request) => router.handle(request));
   });
 
   after(() => {
-    httpServer.close();
+    server.close();
   });
 
   function send(client: WebSocketConnection, type: string, data?: unknown) {
@@ -220,7 +335,7 @@ describe("MessageRouter", () => {
 
   test("each type reaches its handler with its data", async () => {
     received.length = 0;
-    const client = await connect(`${url}/rooms/42`);
+    const client = await connect(`${server.url}/rooms/42`);
     const reply = nextText(client);
     send(client, "join", "Ada");
     assert.deepEqual(JSON.parse(await reply), {
@@ -245,7 +360,7 @@ describe("MessageRouter", () => {
 
   test("an unknown type goes to the fallback", async () => {
     received.length = 0;
-    const client = await connect(`${url}/rooms/1`);
+    const client = await connect(`${server.url}/rooms/1`);
     send(client, "dance", [1, 2]);
     send(client, "constructor");
     const reply = nextText(client);
@@ -261,7 +376,7 @@ describe("MessageRouter", () => {
   });
 
   test("without a fallback an unknown type is ignored and the connection stays open", async () => {
-    const client = await connect(`${url}/quiet`);
+    const client = await connect(`${server.url}/quiet`);
     send(client, "dance");
     const reply = nextText(client);
     send(client, "ping");
@@ -279,7 +394,7 @@ describe("MessageRouter", () => {
   ] as const) {
     test(`${label} closes the connection with 1007`, async () => {
       received.length = 0;
-      const client = await connect(`${url}/rooms/1`);
+      const client = await connect(`${server.url}/rooms/1`);
       const closed = once(client, "close");
       client.send("text", text);
       const [code] = await closed;
@@ -288,12 +403,25 @@ describe("MessageRouter", () => {
     });
   }
 
+  test("messages that arrive after the 1007 aren't routed", async () => {
+    received.length = 0;
+    const client = await connect(`${server.url}/rooms/1`);
+    const closed = once(client, "close");
+    client.send("text", "not JSON");
+    // sent before the client has seen the server's close frame
+    send(client, "join", "Ada");
+    send(client, "say", "hi");
+    const [code] = await closed;
+    assert.equal(code, 1007);
+    assert.deepEqual(received, []);
+  });
+
   test("binary messages aren't routed and still arrive as binaryMessage", async () => {
     received.length = 0;
     const serverSide = new Promise<WebSocketConnection>((resolve) => {
       onConnection = resolve;
     });
-    const client = await connect(`${url}/rooms/1`);
+    const client = await connect(`${server.url}/rooms/1`);
     const connection = await serverSide;
     onConnection = undefined;
 
@@ -303,6 +431,21 @@ describe("MessageRouter", () => {
     assert.equal(message.type, "binary");
     assert.deepEqual(received, []);
     assert.equal(connection.readyState, "open");
+    client.close();
+  });
+
+  test("a type or the fallback can have only one handler", async () => {
+    const serverSide = new Promise<WebSocketConnection>((resolve) => {
+      onConnection = resolve;
+    });
+    const client = await connect(`${server.url}/quiet`);
+    const connection = await serverSide;
+    onConnection = undefined;
+
+    const messages = new MessageRouter(connection).on("a", () => {});
+    assert.throws(() => messages.on("a", () => {}), /already has a handler/);
+    messages.fallback(() => {});
+    assert.throws(() => messages.fallback(() => {}), /already has a handler/);
     client.close();
   });
 });

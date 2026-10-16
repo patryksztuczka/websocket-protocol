@@ -87,10 +87,21 @@ wsServer.on("request", (request) => {
 
 `WebSocketRouter` routes connections by path during the handshake, and `MessageRouter` routes a connection's JSON messages by type. Both are in `lib/web-socket-router.ts` and work on top of the events above.
 
+The router doesn't listen to the server by itself. Your `request` listener runs its own checks first and then passes the request to `router.handle()`. This listener takes the place of the one in the previous example, because only one listener should answer each request.
+
 ```ts
 import { MessageRouter, WebSocketRouter } from "./lib/web-socket-router.ts";
 
-const router = new WebSocketRouter(wsServer);
+const router = new WebSocketRouter();
+
+wsServer.on("request", (request) => {
+  // auth first; this check could also await something before handle()
+  if (request.query.get("token") !== "secret") {
+    request.reject(401, "Missing or wrong token");
+    return;
+  }
+  router.handle(request);
+});
 
 router.route("/rooms/:id", (connection, { params, query }) => {
   // "/rooms/42?name=Ada" gives params.id "42" and query.get("name") "Ada"
@@ -111,10 +122,11 @@ router.route("/rooms/:id", (connection, { params, query }) => {
 });
 ```
 
-- Routes are tried in the order they were added, and the first match wins. A `:name` segment matches one non-empty segment, and its value is percent-decoded into `params`. A path no route matches gets `404 Not Found` and never a 101.
-- The router accepts the request, calls the handler and then starts reading, so there is no need to call `addSocketEventListeners()`. `connect` still fires for every routed connection, before its handler.
-- Auth goes in a `request` listener added before the router. If it rejects the request, the router leaves it alone.
-- Each text message must be a JSON object with a string `type`. Anything else closes the connection with 1007. A type without a handler goes to the fallback, or is ignored if there is no fallback. `messages.send(type, data)` sends a message in the same shape.
+- Routes are tried in the order they were added, and the first match wins. A `:name` segment matches one non-empty segment. The path and the pattern are compared after percent-decoding, so `/caf%C3%A9` matches `/café`. A param's value is decoded too, and `%2F` in it becomes `/`. A path no route matches gets `404 Not Found` and never a 101.
+- `handle()` does nothing if the request has already been answered or the client has left, for example while an auth check was awaiting.
+- The router accepts the request, calls the handler and then starts reading, so there is no need to call `addSocketEventListeners()`. Add listeners before any `await` in a handler. Messages that arrive while an async handler waits are lost, so do async work before `handle()`. `connect` still fires for every routed connection, before its handler.
+- If a route handler throws, the router closes that connection with 1011 and `handle()` rethrows the error. Catch it in the `request` listener to keep the process running.
+- Each text message must be a JSON object with a string `type`. Anything else closes the connection with 1007, and later messages on it aren't routed. A type without a handler goes to the fallback, or is ignored if there is no fallback. Each type has one handler, so a second `on()` for the same type throws. `messages.send(type, data)` sends a message in the same shape. An error thrown by a message handler isn't caught.
 - Binary messages aren't routed. They still arrive through `binaryMessage`.
 
 The client is `WebSocketClient`. `client.connect("ws://127.0.0.1:8080/")` emits `connect` with a connection that has the same events and methods, or `connectionFailed` with the reason. [`test/scripts/client-test.ts`](test/scripts/client-test.ts) shows it in use.
