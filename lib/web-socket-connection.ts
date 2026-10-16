@@ -120,12 +120,13 @@ export class WebSocketConnection extends EventEmitter {
   }
 
   private combineMessage(): string {
-    const fragments = this.fragments;
-    const combinedMessage = fragments
-      .map((fragment) => fragment.getTextPayload().toString("ascii"))
-      .join("");
+    // text is UTF-8 (RFC 6455 section 5.6) and a character can be split
+    // across fragments, so join the bytes first and decode them once
+    const payloads = this.fragments.map((fragment) =>
+      fragment.getTextPayload(),
+    );
 
-    return combinedMessage;
+    return Buffer.concat(payloads).toString("utf8");
   }
 
   private sendCloseFrame(status: number) {
