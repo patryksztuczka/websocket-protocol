@@ -15,6 +15,7 @@ import type {
   WebSocketConnection,
   WebSocketConnectionOptions,
 } from "../lib/web-socket-connection.ts";
+import type { WebSocketRequest } from "../lib/web-socket-request.ts";
 import { WebSocketServer } from "../lib/web-socket-server.ts";
 
 const TAIL = Buffer.from([0x00, 0x00, 0xff, 0xff]);
@@ -514,6 +515,28 @@ describe("server without perMessageDeflate (the default)", () => {
     client.socket.write(frame(0x1, compress("Hello"), { rsv: 0b100 }));
     await client.expectClose(1002);
     client.close();
+  });
+});
+
+describe("server with perMessageDeflate and a request listener", () => {
+  test("a request the app accepts later still gets compression", async () => {
+    const { httpServer, wsServer, port } = await echoServer({
+      perMessageDeflate: true,
+    });
+    wsServer.on("request", (request: WebSocketRequest) => {
+      setTimeout(() => request.accept(), 10);
+    });
+    const client = await RawClient.connect(port, "permessage-deflate");
+    assert.equal(
+      client.header("sec-websocket-extensions"),
+      "permessage-deflate",
+    );
+    client.socket.write(frame(0x1, compress(LONG_TEXT), { rsv: 0b100 }));
+    const echo = await client.nextFrame();
+    assert.equal(echo?.rsv, 0b100);
+    assert.equal((await client.inflate(echo.payload)).toString(), LONG_TEXT);
+    client.close();
+    httpServer.close();
   });
 });
 
