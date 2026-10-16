@@ -1,0 +1,19 @@
+# WebSocket protocol
+
+A from-scratch implementation of the WebSocket protocol ([RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455)) in TypeScript, built to learn how the protocol works. It uses only Node's built-in modules and has no runtime dependencies. The server is the main focus. The client so far handles only the opening handshake.
+
+## Running and testing
+
+- The code imports `.ts` files directly, so it needs Node 22.6 or newer, or Node 23.6 or newer to run without extra flags.
+- Start the echo server with `node test/scripts/server-test.ts`. It listens on `127.0.0.1:8080`.
+- With the server running, run Autobahn from `test/autobahn` with `sh ./run-wstest.sh`. It needs Docker. The report is written to `test/autobahn/reports/servers/index.html`.
+- `test/autobahn/config/fuzzingclient.json` sets which test cases run. Add a section there once the feature it covers works.
+- Stop the server by the PID you got when you started it, not by matching its name.
+
+## Commits
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) for every commit message: `type: description`, with an optional scope such as `fix(client): ...`. Common types are `feat`, `fix`, `perf`, `refactor`, `test`, `docs` and `chore`. Write the description in plain language and say what changed for someone using the library, for example `fix: text with emoji no longer comes back garbled`.
+
+## Pull requests
+
+Write the PR title and description from [`.github/pull_request_template.md`](.github/pull_request_template.md) and fill in every section. Creating a PR with `gh pr create --body` skips the template, so read it first.
