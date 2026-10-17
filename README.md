@@ -297,25 +297,52 @@ Every case first warms up for 3 seconds, so the JIT compiler has optimized the c
 pnpm bench --servers ours --cases echo-16b,latency --runs 5 --seconds 20 --warmup 3
 ```
 
-A server named `ours@<git ref>` runs the library as it was at that ref, with today's echo server, so `--servers ours@master,ours` compares a branch with `master` in one run. `--profile cpu` or `--profile heap` profiles each server over the measured window and writes the profiles to `--profile-dir` (default `bench/results/profiles`). `--out <file>` sets where the results go. The results file also records the revision each server ran and its garbage collection count and pause time. The `profile-websocket` skill (`.claude/skills/profile-websocket/`) builds on these options to summarize profiles and to judge whether a change made the server faster.
+Results only compare when the same programs produced them, so the versions are pinned. `bench/versions.json` pins Node, Bun and k6, and `package.json` pins ws. The command looks for each program on `PATH`, and for Node also at the Node running the command. If that isn't the pinned version, it looks for one installed by [mise](https://mise.jdx.dev). If it finds neither, it stops before the first run, names what differs and prints the `mise install` command that gets the pinned versions, such as `mise install node@26.5.0 bun@1.4.3 k6@2.3.0`. `--any-versions` runs on whatever is installed instead, for a quick check whose numbers don't go next to the ones below. The results file records the versions that ran and whether they were the pinned ones. To move to newer versions, change the pins and run the whole benchmark again for the results below.
 
-Server CPU is the CPU time the server used during the run, as a share of one core. Node runs the server on one thread, so a value near 100% means the server was the limit. It can go a little over 100%, because the garbage collector also works on other threads. A lower value in an echo case means k6 was, so the result says more about the machine than about the server. k6 needs about 7 cores to send 250,000 messages per second.
+A server named `ours@<git ref>` runs the library as it was at that ref, with today's echo server, so `--servers ours@master,ours` compares a branch with `master` in one run.
+
+The servers can also run on [Bun](https://bun.com) instead of Node. Add `:bun` to a name, as in `ours:bun`, `ws:bun` or `ours@master:bun`, to run that server on Bun. The server named `bun` is Bun's own WebSocket server, [`Bun.serve`](https://bun.com/docs/runtime/http/websockets), which is native code on top of uWebSockets. On Bun, `import "ws"` loads Bun's own replacement for the package, so `bench/servers/ws.ts` loads the real ws from `node_modules` by its path. The load and the client still run on Node. This compares all of them, in about 20 minutes:
+
+```bash
+pnpm bench --servers ours,ws,ours:bun,ws:bun,bun
+```
+
+`--profile cpu` or `--profile heap` profiles each server over the measured window and writes the profiles to `--profile-dir` (default `bench/results/profiles`). `--out <file>` sets where the results go. The results file also records the revision and runtime of each server, and its garbage collection count and pause time. Bun doesn't report garbage collections, so those are `null` for servers on Bun, and `--profile` works only with servers on Node. The `profile-websocket` skill (`.claude/skills/profile-websocket/`) builds on these options to summarize profiles and to judge whether a change made the server faster.
+
+Server CPU is the CPU time the server used during the run, as a share of one core. Node runs the server on one thread, so a value near 100% means the server was the limit. It can go a little over 100%, because the garbage collector also works on other threads, in Node and in Bun. A lower value in an echo case means k6 was, so the result says more about the machine than about the server. k6 needs about 7 cores to send 250,000 messages per second.
 
 ### Results
 
-On an Apple M5 Pro (15 cores) with macOS, Node 26.5.0 and k6 2.3.0, on 17 October 2026:
+On an Apple M5 Pro (15 cores) with macOS and the pinned Node 26.5.0, Bun 1.4.3, k6 2.3.0 and ws 8.22.0, on 17 October 2026, from `pnpm bench --servers ours,ws,ours:bun,ws:bun,bun`:
 
-| Case                              | Server | Result                                                  | Server CPU | Server peak memory |
-| --------------------------------- | ------ | ------------------------------------------------------- | ---------- | ------------------ |
-| Echo, 16 B text, 50 connections   | ours   | 214,173 echoes/s                                        | 94%        | 168 MiB            |
-| Echo, 16 B text, 50 connections   | ws     | 227,241 echoes/s                                        | 95%        | 137 MiB            |
-| Echo, 1 KiB text, 50 connections  | ours   | 163,818 echoes/s                                        | 101%       | 204 MiB            |
-| Echo, 1 KiB text, 50 connections  | ws     | 182,433 echoes/s                                        | 95%        | 136 MiB            |
-| Echo, 64 KiB text, 50 connections | ours   | 14,815 echoes/s                                         | 103%       | 360 MiB            |
-| Echo, 64 KiB text, 50 connections | ws     | 17,231 echoes/s                                         | 108%       | 415 MiB            |
-| Open and close 300 connections/s  | ours   | 300 connections/s                                       | 9%         | 139 MiB            |
-| Open and close 300 connections/s  | ws     | 300 connections/s                                       | 9%         | 127 MiB            |
-| Round trip at 10,000 msg/s, 16 B  | ours   | 0.26 p50 ms, 0.86 p99 ms, 2.75 max ms, 9,290 messages/s | 14%        | 123 MiB            |
-| Round trip at 10,000 msg/s, 16 B  | ws     | 0.28 p50 ms, 0.81 p99 ms, 1.90 max ms, 9,296 messages/s | 15%        | 106 MiB            |
+| Case                              | Server   | Result                                                  | Server CPU | Server peak memory |
+| --------------------------------- | -------- | ------------------------------------------------------- | ---------- | ------------------ |
+| Echo, 16 B text, 50 connections   | ours     | 220,390 echoes/s                                        | 95%        | 169 MiB            |
+| Echo, 16 B text, 50 connections   | ws       | 228,084 echoes/s                                        | 95%        | 141 MiB            |
+| Echo, 16 B text, 50 connections   | ours:bun | 219,560 echoes/s                                        | 98%        | 40 MiB             |
+| Echo, 16 B text, 50 connections   | ws:bun   | 228,713 echoes/s                                        | 98%        | 44 MiB             |
+| Echo, 16 B text, 50 connections   | bun      | 302,830 echoes/s                                        | 84%        | 29 MiB             |
+| Echo, 1 KiB text, 50 connections  | ours     | 169,331 echoes/s                                        | 101%       | 203 MiB            |
+| Echo, 1 KiB text, 50 connections  | ws       | 177,182 echoes/s                                        | 94%        | 131 MiB            |
+| Echo, 1 KiB text, 50 connections  | ours:bun | 162,746 echoes/s                                        | 104%       | 41 MiB             |
+| Echo, 1 KiB text, 50 connections  | ws:bun   | 185,877 echoes/s                                        | 101%       | 51 MiB             |
+| Echo, 1 KiB text, 50 connections  | bun      | 287,285 echoes/s                                        | 84%        | 19 MiB             |
+| Echo, 64 KiB text, 50 connections | ours     | 15,167 echoes/s                                         | 103%       | 309 MiB            |
+| Echo, 64 KiB text, 50 connections | ws       | 14,847 echoes/s                                         | 108%       | 338 MiB            |
+| Echo, 64 KiB text, 50 connections | ours:bun | 14,989 echoes/s                                         | 116%       | 100 MiB            |
+| Echo, 64 KiB text, 50 connections | ws:bun   | 21,297 echoes/s                                         | 105%       | 176 MiB            |
+| Echo, 64 KiB text, 50 connections | bun      | 30,859 echoes/s                                         | 102%       | 42 MiB             |
+| Open and close 300 connections/s  | ours     | 300 connections/s                                       | 9%         | 140 MiB            |
+| Open and close 300 connections/s  | ws       | 300 connections/s                                       | 9%         | 129 MiB            |
+| Open and close 300 connections/s  | ours:bun | 300 connections/s                                       | 8%         | 28 MiB             |
+| Open and close 300 connections/s  | ws:bun   | 300 connections/s                                       | 8%         | 31 MiB             |
+| Open and close 300 connections/s  | bun      | 300 connections/s                                       | 3%         | 8 MiB              |
+| Round trip at 10,000 msg/s, 16 B  | ours     | 0.49 p50 ms, 0.79 p99 ms, 2.29 max ms, 8,533 messages/s | 16%        | 124 MiB            |
+| Round trip at 10,000 msg/s, 16 B  | ws       | 0.49 p50 ms, 0.76 p99 ms, 3.52 max ms, 8,494 messages/s | 15%        | 106 MiB            |
+| Round trip at 10,000 msg/s, 16 B  | ours:bun | 0.49 p50 ms, 0.82 p99 ms, 2.33 max ms, 8,441 messages/s | 14%        | 22 MiB             |
+| Round trip at 10,000 msg/s, 16 B  | ws:bun   | 0.49 p50 ms, 0.83 p99 ms, 2.07 max ms, 8,426 messages/s | 14%        | 24 MiB             |
+| Round trip at 10,000 msg/s, 16 B  | bun      | 0.48 p50 ms, 0.73 p99 ms, 1.18 max ms, 8,399 messages/s | 9%         | 9 MiB              |
 
-Both servers kept a core busy in the echo cases, so these numbers compare the servers and not k6. ws echoes 6% more 16-byte messages, 11% more 1 KiB messages and 16% more 64 KiB messages, and the three runs of each server don't overlap. With 1 KiB messages this server also uses half as much memory again. At this rate the two servers open connections for the same CPU time, and their round-trip times are the same.
+On Node, both servers kept a core busy in the echo cases, so these numbers compare the servers and not k6. ws echoes 3% more 16-byte messages and 5% more 1 KiB messages, and the three runs of each server don't overlap. With 1 KiB messages this server also uses about half as much memory again. With 64 KiB messages this server came out 2% ahead, in this run and in a second one, but an earlier run on the same machine had ws 16% ahead, so call that case even. At this rate the two servers open connections for the same CPU time, and their round-trip times are the same.
+
+On Bun, this server echoes as many messages as on Node, or 4% fewer with 1 KiB messages, and peaks at a fifth to a third of the memory. ws gains more from Bun: 5% more 1 KiB messages than on Node and 43% more 64 KiB messages, which puts it 42% ahead of this server there. Bun's own server, which is native code, echoes twice as many 64 KiB messages as this server. With 16 B and 1 KiB messages it used only 84% of a core, so k6 was the limit and its real rate is higher than the table shows. It also opens connections for a third of the CPU time. Round-trip times are the same for all five servers.

@@ -5,8 +5,15 @@
 //
 // A server named ours@<git ref> runs this library as it was at that ref, with
 // today's echo server and harness, so two versions can be compared in one
-// run. --profile cpu or heap profiles each server over the measured window
-// and writes the profiles to --profile-dir.
+// run. A name ending in :bun, such as ours:bun, runs that server on Bun
+// instead of Node, and the server named bun is Bun's own, Bun.serve.
+// --profile cpu or heap profiles each server over the measured window and
+// writes the profiles to --profile-dir.
+//
+// Node, Bun and k6 must be at the versions in bench/versions.json and ws at
+// the one in package.json, so results from different days compare; tools.ts
+// finds the programs on PATH or in mise. --any-versions runs on whatever is
+// installed.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import {
@@ -22,6 +29,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 
 import type { ServerMessage } from "./servers/runner-ipc.ts";
+import { findTool, pinned, type FoundTool, type Tool } from "./tools.ts";
 
 /** One load scenario. */
 interface BenchCase {
@@ -68,6 +76,21 @@ const CASES: Record<string, BenchCase> = {
 
 const SERVERS = ["ours", "ws"];
 
+type Runtime = "node" | "bun";
+
+/**
+ * Splits a server name into the code it runs and the runtime it runs on:
+ * ours@master:bun is ours@master on Bun. A git ref can't contain ":".
+ */
+function parseServer(name: string): { code: string; runtime: Runtime } {
+  if (name === "bun") return { code: "bun", runtime: "bun" };
+  const [code = "", runtime = "node", ...rest] = name.split(":");
+  if (rest.length > 0 || (runtime !== "node" && runtime !== "bun")) {
+    throw new Error(`Unknown runtime in server ${name}; only :bun is known`);
+  }
+  return { code, runtime };
+}
+
 const { values: args } = parseArgs({
   options: {
     servers: { type: "string", default: SERVERS.join(",") },
@@ -78,6 +101,7 @@ const { values: args } = parseArgs({
     profile: { type: "string" },
     "profile-dir": { type: "string" },
     out: { type: "string" },
+    "any-versions": { type: "boolean", default: false },
   },
 });
 
@@ -108,45 +132,111 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const git = (...gitArgs: string[]) =>
   execFileSync("git", gitArgs, { cwd: repoRoot, encoding: "utf8" }).trim();
 
-/** Which code each server runs, for the results file. */
-const revisions: Record<string, string> = {};
-for (const name of servers) {
-  if (name.startsWith("ours@")) {
-    const ref = name.slice("ours@".length);
-    try {
-      revisions[name] = git("rev-parse", "--short", `${ref}^{commit}`);
-    } catch {
-      throw new Error(`Unknown git ref in server ${name}`);
-    }
-  } else if (name === "ours") {
-    const dirty = git("status", "--porcelain", "--", "lib").length > 0;
-    revisions[name] =
-      git("rev-parse", "--short", "HEAD") +
-      (dirty ? " with uncommitted lib/ changes" : "");
-  } else if (name === "ws") {
+for (const name of caseNames) {
+  if (!(name in CASES)) throw new Error(`Unknown case: ${name}`);
+}
+const onBun = servers.some((name) => parseServer(name).runtime === "bun");
+if (onBun && profile) {
+  // Bun's inspector has no heap profiler and returns empty CPU profiles
+  throw new Error("--profile works only with servers that run on Node");
+}
+
+const TOOL_NAMES: Record<Tool, string> = { node: "Node", bun: "Bun", k6: "k6" };
+// Node runs the servers or the latency client in every benchmark
+const needed: Tool[] = ["node"];
+if (onBun) needed.push("bun");
+if (caseNames.some((name) => CASES[name]?.tool === "k6")) needed.push("k6");
+
+const tools: Partial<Record<Tool, FoundTool>> = {};
+/** What isn't at its pinned version, one line each. */
+const unpinned: string[] = [];
+const toInstall: string[] = [];
+for (const tool of needed) {
+  const found = findTool(tool);
+  if (found) tools[tool] = found;
+  if (found?.version === pinned[tool]) continue;
+  unpinned.push(
+    `${TOOL_NAMES[tool]} ${found ? found.version : "is not installed"}, pinned ${pinned[tool]}`,
+  );
+  toInstall.push(`${tool}@${pinned[tool]}`);
+}
+
+let wsVersion: string | undefined;
+if (servers.some((name) => parseServer(name).code === "ws")) {
+  const { devDependencies } = JSON.parse(
+    await readFile(path.join(repoRoot, "package.json"), "utf8"),
+  ) as { devDependencies: Record<string, string> };
+  const wsPinned = devDependencies["ws"];
+  try {
     const pkg = JSON.parse(
       await readFile(
         path.join(repoRoot, "node_modules/ws/package.json"),
         "utf8",
       ),
     ) as { version: string };
-    revisions[name] = `ws ${pkg.version}`;
+    wsVersion = pkg.version;
+  } catch {
+    // reported below as not installed
+  }
+  if (wsVersion !== wsPinned) {
+    unpinned.push(
+      `ws ${wsVersion ?? "is not installed"}, package.json pins ${wsPinned}; run pnpm install`,
+    );
+  }
+}
+
+if (unpinned.length > 0) {
+  const missing = needed.some((tool) => !tools[tool]) || !wsVersion;
+  const report = [
+    "Not at the pinned versions:",
+    ...unpinned.map((line) => `  ${line}`),
+    ...(toInstall.length > 0
+      ? [
+          `Install the pinned versions with: mise install ${toInstall.join(" ")}`,
+          "(https://mise.jdx.dev); the benchmark finds them there.",
+        ]
+      : []),
+  ];
+  if (!args["any-versions"] || missing) {
+    if (!missing) {
+      report.push(
+        "Or run with --any-versions for a quick check, whose numbers don't compare with the README.",
+      );
+    }
+    console.error(report.join("\n"));
+    process.exit(1);
+  }
+  console.error(`${report.join("\n")}\nRunning anyway (--any-versions).\n`);
+}
+const node = tools.node as FoundTool;
+
+/** The commit of each ours@<ref>, whose lib/ prepareServers() extracts. */
+const commits: Record<string, string> = {};
+/** Which code each server runs, and on what, for the results file. */
+const revisions: Record<string, string> = {};
+for (const name of servers) {
+  const { code, runtime } = parseServer(name);
+  if (code.startsWith("ours@")) {
+    const ref = code.slice("ours@".length);
+    try {
+      commits[code] = git("rev-parse", "--short", `${ref}^{commit}`);
+    } catch {
+      throw new Error(`Unknown git ref in server ${name}`);
+    }
+    revisions[name] = commits[code];
+  } else if (code === "ours") {
+    const dirty = git("status", "--porcelain", "--", "lib").length > 0;
+    revisions[name] =
+      git("rev-parse", "--short", "HEAD") +
+      (dirty ? " with uncommitted lib/ changes" : "");
+  } else if (code === "bun") {
+    revisions[name] = "Bun.serve";
+  } else if (code === "ws") {
+    revisions[name] = `ws ${wsVersion}`;
   } else {
     throw new Error(`Unknown server: ${name}`);
   }
-}
-for (const name of caseNames) {
-  if (!(name in CASES)) throw new Error(`Unknown case: ${name}`);
-}
-
-let k6Version: string;
-try {
-  k6Version = execFileSync("k6", ["version"], { encoding: "utf8" }).trim();
-} catch {
-  console.error(
-    "k6 is not installed. See https://grafana.com/docs/k6/latest/set-up/install-k6/",
-  );
-  process.exit(1);
+  if (runtime === "bun") revisions[name] += ` on Bun ${tools.bun?.version}`;
 }
 
 const benchDir = import.meta.dirname;
@@ -159,16 +249,23 @@ const serverFiles: Record<string, string> = {};
  * next to a copy of today's echo server, so only the library differs.
  */
 async function prepareServers(tmp: string) {
+  const extracted = new Set<string>();
   for (const name of servers) {
-    if (!name.startsWith("ours@")) {
-      serverFiles[name] = path.join(benchDir, "servers", `${name}.ts`);
+    const { code } = parseServer(name);
+    if (!code.startsWith("ours@")) {
+      serverFiles[name] = path.join(benchDir, "servers", `${code}.ts`);
       continue;
     }
-    const dir = path.join(tmp, `ref-${revisions[name]}`);
+    const commit = commits[code] as string;
+    const dir = path.join(tmp, `ref-${commit}`);
+    serverFiles[name] = path.join(dir, "bench/servers/ours.ts");
+    // ours@<ref> and ours@<ref>:bun share one copy
+    if (extracted.has(commit)) continue;
+    extracted.add(commit);
     await mkdir(path.join(dir, "bench/servers"), { recursive: true });
     const tarball = execFileSync(
       "git",
-      ["archive", "--format=tar", revisions[name] as string, "lib"],
+      ["archive", "--format=tar", commit, "lib"],
       { cwd: repoRoot, maxBuffer: 1 << 28 },
     );
     execFileSync("tar", ["-x", "-C", dir], { input: tarball });
@@ -179,13 +276,14 @@ async function prepareServers(tmp: string) {
       );
     }
     await writeFile(path.join(dir, "package.json"), '{ "type": "module" }\n');
-    serverFiles[name] = path.join(dir, "bench/servers/ours.ts");
   }
 }
 
 /** Starts a benchmark server and resolves once it listens. */
 async function startServer(name: string) {
-  const child = spawn(process.execPath, [serverFiles[name] as string], {
+  const runtime =
+    parseServer(name).runtime === "bun" ? (tools.bun as FoundTool) : node;
+  const child = spawn(runtime.file, [serverFiles[name] as string], {
     stdio: ["ignore", "inherit", "inherit", "ipc"],
   });
   const message = await nextMessage(child);
@@ -247,7 +345,7 @@ async function runLoad(bench: BenchCase, url: string, resultFile: string) {
   const command =
     bench.tool === "k6"
       ? {
-          file: "k6",
+          file: (tools.k6 as FoundTool).file,
           args: [
             "run",
             "--quiet",
@@ -257,7 +355,7 @@ async function runLoad(bench: BenchCase, url: string, resultFile: string) {
           env: process.env,
         }
       : {
-          file: process.execPath,
+          file: node.file,
           args: [script],
           env: { ...process.env, ...stringValues(env) },
         };
@@ -285,9 +383,12 @@ interface RunResult {
   /** Server CPU time over the run, as a share of one core. */
   serverCpu: number;
   serverMaxRssBytes: number;
-  /** Garbage collections in the server during the run, and their pauses. */
-  serverGcCount: number;
-  serverGcPauseMs: number;
+  /**
+   * Garbage collections in the server during the run, and their pauses.
+   * null on Bun, which doesn't report them.
+   */
+  serverGcCount: number | null;
+  serverGcPauseMs: number | null;
   /** The profile written for this run, with --profile. */
   profile?: string;
 }
@@ -343,8 +444,8 @@ async function runOnce(
       metrics,
       serverCpu: (after.cpuMicros - before.cpuMicros) / wallMicros,
       serverMaxRssBytes: after.maxRssBytes,
-      serverGcCount: after.gcCount - before.gcCount,
-      serverGcPauseMs: after.gcPauseMs - before.gcPauseMs,
+      serverGcCount: difference(before.gcCount, after.gcCount),
+      serverGcPauseMs: difference(before.gcPauseMs, after.gcPauseMs),
       ...(profileFile ? { profile: profileFile } : {}),
     };
   } finally {
@@ -353,6 +454,10 @@ async function runOnce(
       await once(child, "exit");
     }
   }
+}
+
+function difference(before: number | null, after: number | null) {
+  return before === null || after === null ? null : after - before;
 }
 
 /**
@@ -465,8 +570,14 @@ await writeFile(
         cores: os.availableParallelism(),
         platform: `${os.platform()} ${os.release()}`,
       },
-      node: process.version,
-      k6: k6Version,
+      // what ran, and whether all of it was at the pinned versions
+      versions: {
+        ...Object.fromEntries(
+          Object.entries(tools).map(([tool, found]) => [tool, found.version]),
+        ),
+        ...(wsVersion ? { ws: wsVersion } : {}),
+      },
+      pinnedVersions: unpinned.length === 0,
       settings: { runs, measureMs, warmupMs, profile: profile ?? null },
       servers: revisions,
       cases: Object.fromEntries(

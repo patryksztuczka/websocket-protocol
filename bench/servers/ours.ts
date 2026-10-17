@@ -1,6 +1,7 @@
 // Echo server built on this library. Compression stays off, the default, as
 // in the ws server, so both do the same work.
 import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import { WebSocketServer } from "../../lib/web-socket-server.ts";
 import { reportToRunner } from "./runner-ipc.ts";
@@ -18,4 +19,6 @@ wsServer.on("connect", (connection) => {
   });
 });
 
-httpServer.listen(0, "127.0.0.1", () => reportToRunner(httpServer));
+httpServer.listen(0, "127.0.0.1", () =>
+  reportToRunner((httpServer.address() as AddressInfo).port),
+);

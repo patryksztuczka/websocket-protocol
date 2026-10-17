@@ -1,9 +1,7 @@
 // The link between a benchmark server and bench/run.ts, which starts the
 // server as a child process with an IPC channel.
 import { writeFileSync } from "node:fs";
-import type { Server } from "node:http";
 import { Session } from "node:inspector/promises";
-import type { AddressInfo } from "node:net";
 import { PerformanceObserver } from "node:perf_hooks";
 
 /** The messages a benchmark server sends to the runner. */
@@ -13,9 +11,12 @@ export type ServerMessage =
       type: "stats";
       cpuMicros: number;
       maxRssBytes: number;
-      /** Garbage collections so far, and the time they paused the thread. */
-      gcCount: number;
-      gcPauseMs: number;
+      /**
+       * Garbage collections so far, and the time they paused the thread.
+       * null on Bun, which doesn't report them.
+       */
+      gcCount: number | null;
+      gcPauseMs: number | null;
     }
   | { type: "profile-started" }
   | { type: "profile-written"; file: string };
@@ -32,8 +33,10 @@ export type RunnerRequest =
  * "profile-start" and "profile-stop" by profiling the process in between,
  * through the inspector, so a profile covers only the measured window.
  */
-export function reportToRunner(httpServer: Server) {
+export function reportToRunner(port: number) {
   const send = (message: ServerMessage) => process.send?.(message);
+  // Bun accepts a "gc" observer but never calls it
+  const reportsGc = !process.versions["bun"];
 
   let gcCount = 0;
   let gcPauseMs = 0;
@@ -54,8 +57,8 @@ export function reportToRunner(httpServer: Server) {
         cpuMicros: cpu.user + cpu.system,
         // maxRSS is in kilobytes
         maxRssBytes: process.resourceUsage().maxRSS * 1024,
-        gcCount,
-        gcPauseMs,
+        gcCount: reportsGc ? gcCount : null,
+        gcPauseMs: reportsGc ? gcPauseMs : null,
       });
     } else if (request.type === "profile-start") {
       const session = new Session();
@@ -93,6 +96,5 @@ export function reportToRunner(httpServer: Server) {
   // a runner that was killed can't stop its servers, so they stop themselves
   process.on("disconnect", () => process.exit(0));
 
-  const { port } = httpServer.address() as AddressInfo;
   send({ type: "listening", port });
 }
