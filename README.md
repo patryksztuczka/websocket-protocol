@@ -10,6 +10,7 @@ A custom, ground-up implementation of the [WebSocket Protocol (RFC 6455)](https:
 - [Usage](#usage)
 - [To Do](#to-do)
 - [Test Suite](#test-suite)
+- [Benchmarks](#benchmarks)
 
 ---
 
@@ -275,3 +276,44 @@ pnpm test
 ```
 
 `pnpm check` runs the formatter, the linter and the type checker.
+
+---
+
+## Benchmarks
+
+`pnpm bench` compares this server with [ws](https://github.com/websockets/ws), the most used WebSocket library for Node. Both run as plain echo servers on `node:http` (`bench/servers/`), with compression off, and ws without its optional native add-ons. Every run starts a fresh server process and puts load on it from a separate process. The command prints the median of the runs as a Markdown table and writes every run to `bench/results/`, which is not committed.
+
+It needs [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/), which generates most of the load:
+
+| Case                                  | What it does                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `echo-16b`, `echo-1kib`, `echo-64kib` | k6 opens 50 connections. Each keeps 10 text messages in flight (4 for 64 KiB) and sends a new one for every echo. Reports echoes per second.                                                                                                                                                                                 |
+| `connect`                             | k6 opens 300 connections per second and closes each one once it is open. The rate is fixed: a closed connection can hold its client port for 30 seconds (TIME_WAIT), and one machine has only about 16,000 of them on macOS, so an unlimited run stops connecting after a few seconds. Compare the servers by their CPU use. |
+| `latency`                             | 50 connections each send 200 messages of 16 bytes per second. Reports the round-trip time. It uses Node's built-in `WebSocket` client, because k6 measures time in whole milliseconds and a round trip over loopback takes less than one.                                                                                    |
+
+Every case first warms up for 3 seconds, so the JIT compiler has optimized the code before anything is counted, and then measures for 10 seconds. With 3 runs per case and server the whole command takes about 8 minutes. To run part of it or change the times:
+
+```bash
+pnpm bench --servers ours --cases echo-16b,latency --runs 5 --seconds 20 --warmup 3
+```
+
+Server CPU is the CPU time the server used during the run, as a share of one core. Node runs the server on one thread, so a value near 100% means the server was the limit. It can go a little over 100%, because the garbage collector also works on other threads. A lower value in an echo case means k6 was, so the result says more about the machine than about the server. k6 needs about 7 cores to send 250,000 messages per second.
+
+### Results
+
+On an Apple M5 Pro (15 cores) with macOS, Node 26.5.0 and k6 2.3.0, on 17 October 2026:
+
+| Case                              | Server | Result                                                  | Server CPU | Server peak memory |
+| --------------------------------- | ------ | ------------------------------------------------------- | ---------- | ------------------ |
+| Echo, 16 B text, 50 connections   | ours   | 214,173 echoes/s                                        | 94%        | 168 MiB            |
+| Echo, 16 B text, 50 connections   | ws     | 227,241 echoes/s                                        | 95%        | 137 MiB            |
+| Echo, 1 KiB text, 50 connections  | ours   | 163,818 echoes/s                                        | 101%       | 204 MiB            |
+| Echo, 1 KiB text, 50 connections  | ws     | 182,433 echoes/s                                        | 95%        | 136 MiB            |
+| Echo, 64 KiB text, 50 connections | ours   | 14,815 echoes/s                                         | 103%       | 360 MiB            |
+| Echo, 64 KiB text, 50 connections | ws     | 17,231 echoes/s                                         | 108%       | 415 MiB            |
+| Open and close 300 connections/s  | ours   | 300 connections/s                                       | 9%         | 139 MiB            |
+| Open and close 300 connections/s  | ws     | 300 connections/s                                       | 9%         | 127 MiB            |
+| Round trip at 10,000 msg/s, 16 B  | ours   | 0.26 p50 ms, 0.86 p99 ms, 2.75 max ms, 9,290 messages/s | 14%        | 123 MiB            |
+| Round trip at 10,000 msg/s, 16 B  | ws     | 0.28 p50 ms, 0.81 p99 ms, 1.90 max ms, 9,296 messages/s | 15%        | 106 MiB            |
+
+Both servers kept a core busy in the echo cases, so these numbers compare the servers and not k6. ws echoes 6% more 16-byte messages, 11% more 1 KiB messages and 16% more 64 KiB messages, and the three runs of each server don't overlap. With 1 KiB messages this server also uses half as much memory again. At this rate the two servers open connections for the same CPU time, and their round-trip times are the same.
