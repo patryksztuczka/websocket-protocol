@@ -29,7 +29,7 @@ $P/profile.ts --case echo-1kib --servers ours,ws       # both, to compare where 
 $P/profile.ts --case echo-16b --kind cpu --servers ours@master,ours
 ```
 
-The options are `--case` (one of `echo-16b`, `echo-1kib`, `echo-64kib`, `connect`, `latency` from `bench/run.ts`), `--servers` (`ours` is the working tree, `ours@<git ref>` is `lib/` at that ref, and `ws` is the reference library), `--kind cpu|heap|both` (default `both`), `--seconds` (default 10), `--warmup` (default 3), `--top` (default 25) and `--id`.
+The options are `--case` (one of `echo-16b`, `echo-1kib`, `echo-64kib`, `connect`, `latency` from `bench/run.ts`), `--servers` (`ours` is the working tree, `ours@<git ref>` is `lib/` at that ref, and `ws` is the reference library; servers on Bun, such as `ours:bun`, can't be profiled, because Bun's inspector returns empty CPU profiles and has no heap profiler), `--kind cpu|heap|both` (default `both`), `--seconds` (default 10), `--warmup` (default 3), `--top` (default 25) and `--id`.
 
 Each server runs once per kind. The profile covers only the measured window, after the warm-up: `bench/run.ts --profile` starts the inspector in the server when the warm-up ends and stops it when the load does. Then `analyze-profile.ts` prints a summary like this:
 
@@ -89,7 +89,7 @@ Proof standards for a performance claim:
 - Quote the `compare.md` table for the cases you claim, with its header line, which names both revisions. The `Base runs` and `Head runs` columns show the spread.
 - Claim an improvement only for metrics marked `better`. Report `worse` metrics too, even in cases you didn't target. A change that speeds up 16 B echoes and slows 64 KiB ones must say so.
 - Explain the effect with a profile. Quote the before and after lines of `analyze-profile.ts` (per-item time or bytes of the functions you changed), not just the throughput.
-- Name the machine, and don't compare numbers from different machines or from a run with other heavy work going on. Plugged-in power and no other benchmarks running matter.
+- Name the machine, and don't compare numbers from different machines, from different versions of Node or k6, or from a run with other heavy work going on. `bench/run.ts` refuses to run unless the versions are the pinned ones (`bench/versions.json`); install them with the `mise install` command it prints rather than pinning other versions. Plugged-in power and no other benchmarks running matter.
 
 ## Cleanup
 
