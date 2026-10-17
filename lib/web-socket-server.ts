@@ -6,12 +6,20 @@ import {
   resolvePerMessageDeflateOptions,
   type ResolvedPerMessageDeflateOptions,
 } from "./permessage-deflate.ts";
-import { WebSocketRequest } from "./web-socket-request.ts";
+import { HandshakeError, WebSocketRequest } from "./web-socket-request.ts";
 import type {
   WebSocketConnection,
   WebSocketConnectionOptions,
 } from "./web-socket-connection.ts";
 import type { Socket } from "node:net";
+
+/** The events the server emits and the arguments their listeners get. */
+export interface WebSocketServerEvents {
+  /** A handshake passed the checks; answer it with accept() or reject(). */
+  request: [request: WebSocketRequest];
+  /** A request was accepted and its connection is open. */
+  connect: [connection: WebSocketConnection];
+}
 
 /**
  * Emits "request" with a WebSocketRequest for every opening handshake that
@@ -19,7 +27,7 @@ import type { Socket } from "node:net";
  * Without a "request" listener every such request is accepted. Emits
  * "connect" with the WebSocketConnection of every accepted request.
  */
-export class WebSocketServer extends EventEmitter {
+export class WebSocketServer extends EventEmitter<WebSocketServerEvents> {
   private httpServer: Server | HttpsServer;
   private connections: WebSocketConnection[] = [];
   private connectionOptions: WebSocketConnectionOptions;
@@ -55,19 +63,22 @@ export class WebSocketServer extends EventEmitter {
     try {
       wsRequest.readRequest();
     } catch (error) {
-      wsRequest.rejectRequest(error);
+      // readRequest() only throws HandshakeError; anything else is a bug
+      if (!(error instanceof HandshakeError)) throw error;
+      wsRequest.reject(error.status, error.message);
       return;
     }
 
     // the app may answer later, so the connection is added whenever it is
     // accepted rather than right here
     wsRequest.once("accept", (connection) => {
-      this.emit("connect", connection);
       this.connections.push(connection);
       // forget the connection once it has closed
       socket.once("close", () => {
         this.connections = this.connections.filter((c) => c !== connection);
       });
+      // last, so a "connect" listener that throws can't stop the above
+      this.emit("connect", connection);
     });
 
     // apps that don't listen to "request" get every valid request accepted,

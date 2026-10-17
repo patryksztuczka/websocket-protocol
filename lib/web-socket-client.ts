@@ -267,12 +267,12 @@ export class WebSocketClient extends EventEmitter {
     const connection = new WebSocketConnection(
       this.socket,
       "client",
-      this.connectionOptions,
       {
         path: this.target.pathname,
         query: new URLSearchParams(this.target.search),
         headers: response.headers,
       },
+      this.connectionOptions,
       compression,
     );
 

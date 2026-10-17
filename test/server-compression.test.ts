@@ -658,3 +658,115 @@ describe("server with perMessageDeflate: timing and cleanup", () => {
     }
   });
 });
+
+describe("server with perMessageDeflate: requests the app answers", () => {
+  test("a client that leaves before accept() gets no connection and no zlib streams", async () => {
+    const created: unknown[] = [];
+    const { createDeflateRaw, createInflateRaw } = zlib;
+    const deflate = mock.method(
+      zlib,
+      "createDeflateRaw",
+      (options?: zlib.ZlibOptions) => {
+        created.push("deflate");
+        return createDeflateRaw(options);
+      },
+    );
+    const inflate = mock.method(
+      zlib,
+      "createInflateRaw",
+      (options?: zlib.ZlibOptions) => {
+        created.push("inflate");
+        return createInflateRaw(options);
+      },
+    );
+    const { httpServer, wsServer, port } = await echoServer({
+      perMessageDeflate: true,
+    });
+
+    try {
+      let connects = 0;
+      wsServer.on("connect", () => connects++);
+      const requested = new Promise<WebSocketRequest>((resolve) =>
+        wsServer.on("request", resolve),
+      );
+      // a raw handshake that offers compression; the client leaves before
+      // the app answers
+      const socket = net.connect(port, "127.0.0.1");
+      sockets.add(socket);
+      socket.on("error", () => {});
+      await once(socket, "connect");
+      socket.write(
+        "GET / HTTP/1.1\r\n" +
+          `Host: 127.0.0.1:${port}\r\n` +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+          "Sec-WebSocket-Version: 13\r\n" +
+          "Sec-WebSocket-Extensions: permessage-deflate\r\n" +
+          "\r\n",
+      );
+      const request = await requested;
+      const closed = once(request, "close");
+      socket.end();
+      await closed;
+
+      assert.equal(request.accept(), undefined);
+      assert.equal(connects, 0);
+      assert.deepEqual(created, []);
+    } finally {
+      deflate.mock.restore();
+      inflate.mock.restore();
+      for (const socket of sockets) socket.destroy();
+      httpServer.close();
+    }
+  });
+
+  test("a connect listener that throws after a long send: its compressed message goes out before the 1011", async () => {
+    const httpServer = createServer();
+    const wsServer = new WebSocketServer(httpServer, {
+      perMessageDeflate: true,
+    });
+    const errors: unknown[] = [];
+    wsServer.on("connect", (connection) => {
+      // compressing this takes until after the listener has thrown
+      connection.send("text", LONG_TEXT);
+      throw new Error("connect listener failed");
+    });
+    wsServer.on("request", (request) => {
+      try {
+        request.accept();
+      } catch (error) {
+        errors.push(error);
+      }
+    });
+    httpServer.listen(0, "127.0.0.1");
+    await once(httpServer, "listening");
+    const port = (httpServer.address() as net.AddressInfo).port;
+
+    try {
+      const client = await RawClient.connect(port, "permessage-deflate");
+      // the message first, compressed, then the close frame queued behind it
+      const message = await client.nextFrame();
+      assert.equal(message?.opcode, 0x1);
+      assert.equal(message.rsv, 0b100);
+      assert.equal(
+        (await client.inflate(message.payload)).toString(),
+        LONG_TEXT,
+      );
+      await client.expectClose(1011);
+      assert.match(String(errors[0]), /connect listener failed/);
+
+      // the connection is read: our close frame answers its 1011, and the
+      // server ends the TCP connection right away rather than after its 5 s
+      // close timeout
+      const started = Date.now();
+      client.socket.write(frame(0x8, Buffer.from([0x03, 0xf3])));
+      assert.equal(await client.nextFrame(), undefined);
+      assert.ok(Date.now() - started < 1000);
+      client.close();
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      httpServer.close();
+    }
+  });
+});
