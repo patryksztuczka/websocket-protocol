@@ -72,6 +72,15 @@ const runs = Number(args.runs);
 const measureMs = Number(args.seconds) * 1000;
 const warmupMs = Number(args.warmup) * 1000;
 
+if (!Number.isInteger(runs) || runs < 1) {
+  throw new Error(`--runs must be a whole number of at least 1: ${args.runs}`);
+}
+if (!(measureMs > 0)) {
+  throw new Error(`--seconds must be more than 0: ${args.seconds}`);
+}
+if (!(warmupMs >= 0)) {
+  throw new Error(`--warmup must be 0 or more: ${args.warmup}`);
+}
 for (const name of servers) {
   if (!SERVERS.includes(name)) throw new Error(`Unknown server: ${name}`);
 }
@@ -98,15 +107,48 @@ async function startServer(name: string) {
     [path.join(benchDir, "servers", `${name}.ts`)],
     { stdio: ["ignore", "inherit", "inherit", "ipc"] },
   );
-  const [message] = (await once(child, "message")) as [ServerMessage];
+  const message = await nextMessage(child);
   if (message.type !== "listening") throw new Error("Server did not start");
   return { child, url: `ws://127.0.0.1:${message.port}` };
 }
 
+function hasExited(child: ChildProcess) {
+  // a child killed by a signal keeps exitCode null and sets signalCode
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+/**
+ * Resolves with the next message from a server, or rejects once the server
+ * has exited, so a server that crashes fails the run instead of hanging it.
+ */
+function nextMessage(child: ChildProcess): Promise<ServerMessage> {
+  return new Promise((resolve, reject) => {
+    const exitError = () =>
+      new Error(
+        `Server exited with ${child.signalCode ?? `code ${child.exitCode}`}`,
+      );
+    if (hasExited(child)) {
+      reject(exitError());
+      return;
+    }
+    const onExit = () => {
+      child.off("message", onMessage);
+      reject(exitError());
+    };
+    const onMessage = (message: unknown) => {
+      child.off("exit", onExit);
+      resolve(message as ServerMessage);
+    };
+    child.once("exit", onExit);
+    child.once("message", onMessage);
+  });
+}
+
 /** Asks a server for the CPU time and peak memory it has used so far. */
 async function serverStats(child: ChildProcess) {
-  child.send("stats");
-  const [message] = (await once(child, "message")) as [ServerMessage];
+  // sending to a server that has exited would throw ERR_IPC_CHANNEL_CLOSED
+  if (!hasExited(child)) child.send("stats");
+  const message = await nextMessage(child);
   if (message.type !== "stats") throw new Error("Unexpected server message");
   return message;
 }
@@ -182,9 +224,29 @@ async function runOnce(
       serverMaxRssBytes: after.maxRssBytes,
     };
   } finally {
-    child.kill();
-    if (child.exitCode === null) await once(child, "exit");
+    if (!hasExited(child)) {
+      child.kill();
+      await once(child, "exit");
+    }
   }
+}
+
+/**
+ * Counts a load script reports when the load it put on the server was not
+ * the one asked for. They are not results, so the table leaves them out.
+ */
+const PROBLEM_COUNTS = ["errors", "dropped"];
+
+/** Describes the problems of one run, or returns "" if it had none. */
+function describeProblems(metrics: Record<string, number>) {
+  const errors = metrics["errors"] ?? 0;
+  const dropped = metrics["dropped"] ?? 0;
+  return [
+    errors ? `${errors} connection errors` : "",
+    dropped ? `${dropped} connections not opened because k6 was busy` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 function median(numbers: number[]) {
@@ -216,9 +278,8 @@ try {
       for (const server of order) {
         console.error(`${caseName}: ${server}, run ${run} of ${runs}`);
         const result = await runOnce(bench, server, tmp);
-        if (result.metrics["errors"]) {
-          console.error(`  ${result.metrics["errors"]} connection errors`);
-        }
+        const problems = describeProblems(result.metrics);
+        if (problems) console.error(`  ${problems}`);
         (byServer[server] ??= []).push(result);
       }
     }
@@ -226,7 +287,7 @@ try {
     for (const server of servers) {
       const serverRuns = byServer[server] ?? [];
       const names = Object.keys(serverRuns[0]?.metrics ?? {}).filter(
-        (name) => name !== "errors",
+        (name) => !PROBLEM_COUNTS.includes(name),
       );
       const metrics = names
         .map(
@@ -236,8 +297,14 @@ try {
         .join(", ");
       const cpu = median(serverRuns.map((r) => r.serverCpu));
       const rss = median(serverRuns.map((r) => r.serverMaxRssBytes));
+      const flawedRuns = serverRuns.filter((r) =>
+        describeProblems(r.metrics),
+      ).length;
+      const warning = flawedRuns
+        ? ` (${flawedRuns} of ${serverRuns.length} runs had connection errors or dropped connections; don't compare)`
+        : "";
       rows.push(
-        `| ${bench.title} | ${server} | ${metrics} | ${Math.round(cpu * 100)}% | ${Math.round(rss / 2 ** 20)} MiB |`,
+        `| ${bench.title} | ${server} | ${metrics}${warning} | ${Math.round(cpu * 100)}% | ${Math.round(rss / 2 ** 20)} MiB |`,
       );
     }
   }

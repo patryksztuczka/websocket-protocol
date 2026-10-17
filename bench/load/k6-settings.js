@@ -29,6 +29,9 @@ export function writeResult(data, name, perSecond) {
   const result = {
     [name]: count(perSecond) / (measureMs / 1000),
     errors: count("errors"),
+    // connections a fixed-rate scenario never opened because every virtual
+    // user was busy; the load was then lighter than asked for
+    dropped: count("dropped_iterations"),
   };
   return { [__ENV.RESULT_FILE]: JSON.stringify(result) };
 }

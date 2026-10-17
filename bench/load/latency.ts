@@ -61,6 +61,11 @@ await sleep(warmupMs + measureMs);
 for (const timer of timers) clearInterval(timer);
 await sleep(500);
 
+if (roundTrips.length === 0) {
+  // without samples every percentile would read 0 ms
+  throw new Error("No echoes came back during the measured window");
+}
+
 roundTrips.sort((a, b) => a - b);
 const percentile = (p: number) =>
   roundTrips[
