@@ -40,3 +40,8 @@ yarn-error.log*
 *.pem
 # the self-signed test certificate and its key are made for the tests on purpose
 !test/fixtures/*.pem
+
+# evidence from the verify-websocket skill (.claude/skills/verify-websocket)
+verify-artifacts
+# agent worktrees
+.claude/worktrees

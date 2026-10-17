@@ -10,6 +10,7 @@ A from-scratch implementation of the WebSocket protocol ([RFC 6455](https://data
 - Then run `pnpm autobahn:check`. It prints a summary per section and exits with an error if any case failed. CI runs the same steps on every push and pull request.
 - `test/autobahn/config/fuzzingclient.json` sets which test cases run. Add a section there once the feature it covers works. Cases that still fail because of an open bug are listed in `exclude-cases`; a fix removes its own cases from that list.
 - `pnpm bench` compares the server with `ws` on Node. It needs [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/), starts its own servers and takes about 8 minutes. The Benchmarks section of the README explains the cases and the options.
+- To prove a change over a real connection, follow `.claude/skills/verify-websocket/SKILL.md`. It launches an isolated server on a free port, drives it with a client or raw frames, keeps the evidence in `verify-artifacts/` and lists a recipe for each feature in `features/`.
 - Stop the server by the PID you got when you started it, not by matching its name.
 
 ## Commits
