@@ -297,6 +297,8 @@ Every case first warms up for 3 seconds, so the JIT compiler has optimized the c
 pnpm bench --servers ours --cases echo-16b,latency --runs 5 --seconds 20 --warmup 3
 ```
 
+A server named `ours@<git ref>` runs the library as it was at that ref, with today's echo server, so `--servers ours@master,ours` compares a branch with `master` in one run. `--profile cpu` or `--profile heap` profiles each server over the measured window and writes the profiles to `--profile-dir` (default `bench/results/profiles`). `--out <file>` sets where the results go. The results file also records the revision each server ran and its garbage collection count and pause time. The `profile-websocket` skill (`.claude/skills/profile-websocket/`) builds on these options to summarize profiles and to judge whether a change made the server faster.
+
 Server CPU is the CPU time the server used during the run, as a share of one core. Node runs the server on one thread, so a value near 100% means the server was the limit. It can go a little over 100%, because the garbage collector also works on other threads. A lower value in an echo case means k6 was, so the result says more about the machine than about the server. k6 needs about 7 cores to send 250,000 messages per second.
 
 ### Results

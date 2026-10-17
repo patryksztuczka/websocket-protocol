@@ -2,9 +2,21 @@
 // it with a script from bench/load and prints the median of several runs as a
 // Markdown table. Every run gets a fresh server process. The full results go
 // to bench/results/. See "Benchmarks" in the README.
+//
+// A server named ours@<git ref> runs this library as it was at that ref, with
+// today's echo server and harness, so two versions can be compared in one
+// run. --profile cpu or heap profiles each server over the measured window
+// and writes the profiles to --profile-dir.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -63,6 +75,9 @@ const { values: args } = parseArgs({
     runs: { type: "string", default: "3" },
     seconds: { type: "string", default: "10" },
     warmup: { type: "string", default: "3" },
+    profile: { type: "string" },
+    "profile-dir": { type: "string" },
+    out: { type: "string" },
   },
 });
 
@@ -81,8 +96,44 @@ if (!(measureMs > 0)) {
 if (!(warmupMs >= 0)) {
   throw new Error(`--warmup must be 0 or more: ${args.warmup}`);
 }
+const profile = args.profile;
+if (profile !== undefined && profile !== "cpu" && profile !== "heap") {
+  throw new Error(`--profile must be "cpu" or "heap": ${profile}`);
+}
+const profileDir = path.resolve(
+  args["profile-dir"] ?? "bench/results/profiles",
+);
+
+const repoRoot = path.resolve(import.meta.dirname, "..");
+const git = (...gitArgs: string[]) =>
+  execFileSync("git", gitArgs, { cwd: repoRoot, encoding: "utf8" }).trim();
+
+/** Which code each server runs, for the results file. */
+const revisions: Record<string, string> = {};
 for (const name of servers) {
-  if (!SERVERS.includes(name)) throw new Error(`Unknown server: ${name}`);
+  if (name.startsWith("ours@")) {
+    const ref = name.slice("ours@".length);
+    try {
+      revisions[name] = git("rev-parse", "--short", `${ref}^{commit}`);
+    } catch {
+      throw new Error(`Unknown git ref in server ${name}`);
+    }
+  } else if (name === "ours") {
+    const dirty = git("status", "--porcelain", "--", "lib").length > 0;
+    revisions[name] =
+      git("rev-parse", "--short", "HEAD") +
+      (dirty ? " with uncommitted lib/ changes" : "");
+  } else if (name === "ws") {
+    const pkg = JSON.parse(
+      await readFile(
+        path.join(repoRoot, "node_modules/ws/package.json"),
+        "utf8",
+      ),
+    ) as { version: string };
+    revisions[name] = `ws ${pkg.version}`;
+  } else {
+    throw new Error(`Unknown server: ${name}`);
+  }
 }
 for (const name of caseNames) {
   if (!(name in CASES)) throw new Error(`Unknown case: ${name}`);
@@ -100,13 +151,43 @@ try {
 
 const benchDir = import.meta.dirname;
 
+/** The script each server runs; filled in by prepareServers(). */
+const serverFiles: Record<string, string> = {};
+
+/**
+ * Finds each server's script. For ours@<ref> it extracts lib/ at that ref
+ * next to a copy of today's echo server, so only the library differs.
+ */
+async function prepareServers(tmp: string) {
+  for (const name of servers) {
+    if (!name.startsWith("ours@")) {
+      serverFiles[name] = path.join(benchDir, "servers", `${name}.ts`);
+      continue;
+    }
+    const dir = path.join(tmp, `ref-${revisions[name]}`);
+    await mkdir(path.join(dir, "bench/servers"), { recursive: true });
+    const tarball = execFileSync(
+      "git",
+      ["archive", "--format=tar", revisions[name] as string, "lib"],
+      { cwd: repoRoot, maxBuffer: 1 << 28 },
+    );
+    execFileSync("tar", ["-x", "-C", dir], { input: tarball });
+    for (const file of ["ours.ts", "runner-ipc.ts"]) {
+      await copyFile(
+        path.join(benchDir, "servers", file),
+        path.join(dir, "bench/servers", file),
+      );
+    }
+    await writeFile(path.join(dir, "package.json"), '{ "type": "module" }\n');
+    serverFiles[name] = path.join(dir, "bench/servers/ours.ts");
+  }
+}
+
 /** Starts a benchmark server and resolves once it listens. */
 async function startServer(name: string) {
-  const child = spawn(
-    process.execPath,
-    [path.join(benchDir, "servers", `${name}.ts`)],
-    { stdio: ["ignore", "inherit", "inherit", "ipc"] },
-  );
+  const child = spawn(process.execPath, [serverFiles[name] as string], {
+    stdio: ["ignore", "inherit", "inherit", "ipc"],
+  });
   const message = await nextMessage(child);
   if (message.type !== "listening") throw new Error("Server did not start");
   return { child, url: `ws://127.0.0.1:${message.port}` };
@@ -204,24 +285,67 @@ interface RunResult {
   /** Server CPU time over the run, as a share of one core. */
   serverCpu: number;
   serverMaxRssBytes: number;
+  /** Garbage collections in the server during the run, and their pauses. */
+  serverGcCount: number;
+  serverGcPauseMs: number;
+  /** The profile written for this run, with --profile. */
+  profile?: string;
 }
 
 async function runOnce(
+  caseName: string,
   bench: BenchCase,
   server: string,
+  run: number,
   tmp: string,
 ): Promise<RunResult> {
   const { child, url } = await startServer(server);
   try {
     const before = await serverStats(child);
     const startedAt = performance.now();
+
+    // the profile starts once the warm-up is over
+    const started: { reply?: Promise<ServerMessage> } = {};
+    const timer = profile
+      ? setTimeout(() => {
+          child.send({ type: "profile-start", kind: profile });
+          started.reply = nextMessage(child);
+          // awaited below; this only keeps an early exit from going unhandled
+          started.reply.catch(() => {});
+        }, warmupMs)
+      : undefined;
+
     const metrics = await runLoad(bench, url, path.join(tmp, "result.json"));
     const wallMicros = (performance.now() - startedAt) * 1000;
+    clearTimeout(timer);
+
+    let profileFile: string | undefined;
+    if (profile) {
+      if (!started.reply) {
+        throw new Error("The load ended before the warm-up");
+      }
+      await started.reply;
+      const safeServer = server.replace(/[^\w.-]/g, "_");
+      profileFile = path.join(
+        profileDir,
+        `${caseName}-${safeServer}-run${run}.${profile === "cpu" ? "cpuprofile" : "heapprofile"}`,
+      );
+      await mkdir(profileDir, { recursive: true });
+      child.send({ type: "profile-stop", file: profileFile });
+      const written = await nextMessage(child);
+      if (written.type !== "profile-written") {
+        throw new Error("Unexpected server message");
+      }
+    }
+
     const after = await serverStats(child);
     return {
       metrics,
       serverCpu: (after.cpuMicros - before.cpuMicros) / wallMicros,
       serverMaxRssBytes: after.maxRssBytes,
+      serverGcCount: after.gcCount - before.gcCount,
+      serverGcPauseMs: after.gcPauseMs - before.gcPauseMs,
+      ...(profileFile ? { profile: profileFile } : {}),
     };
   } finally {
     if (!hasExited(child)) {
@@ -267,6 +391,7 @@ const results: Record<string, Record<string, RunResult[]>> = {};
 const rows: string[] = [];
 
 try {
+  await prepareServers(tmp);
   for (const caseName of caseNames) {
     const bench = CASES[caseName] as BenchCase;
     const byServer: Record<string, RunResult[]> = {};
@@ -277,7 +402,7 @@ try {
       const order = run % 2 ? servers : servers.toReversed();
       for (const server of order) {
         console.error(`${caseName}: ${server}, run ${run} of ${runs}`);
-        const result = await runOnce(bench, server, tmp);
+        const result = await runOnce(caseName, bench, server, run, tmp);
         const problems = describeProblems(result.metrics);
         if (problems) console.error(`  ${problems}`);
         (byServer[server] ??= []).push(result);
@@ -322,12 +447,14 @@ console.log(
   ].join("\n"),
 );
 
-const resultsDir = path.join(benchDir, "results");
-await mkdir(resultsDir, { recursive: true });
-const resultsFile = path.join(
-  resultsDir,
-  `${new Date().toISOString().replaceAll(":", "-")}.json`,
-);
+const resultsFile = args.out
+  ? path.resolve(args.out)
+  : path.join(
+      benchDir,
+      "results",
+      `${new Date().toISOString().replaceAll(":", "-")}.json`,
+    );
+await mkdir(path.dirname(resultsFile), { recursive: true });
 await writeFile(
   resultsFile,
   JSON.stringify(
@@ -340,7 +467,8 @@ await writeFile(
       },
       node: process.version,
       k6: k6Version,
-      settings: { runs, measureMs, warmupMs },
+      settings: { runs, measureMs, warmupMs, profile: profile ?? null },
+      servers: revisions,
       cases: Object.fromEntries(
         caseNames.map((name) => [
           name,

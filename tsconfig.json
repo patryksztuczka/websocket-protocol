@@ -22,5 +22,6 @@
     "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": true
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  // "**" skips directories that start with a dot, so the skills are listed
+  "include": ["**/*.ts", "**/*.tsx", ".claude/skills/**/*.ts"]
 }
