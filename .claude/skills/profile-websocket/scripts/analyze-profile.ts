@@ -9,6 +9,7 @@
 // profile ran, to print time or bytes per message.
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const { values: args, positionals } = parseArgs({
@@ -33,7 +34,10 @@ interface CallFrame {
 
 /** Where a function lives, as a reader would look it up. */
 function location(frame: CallFrame) {
-  let url = frame.url.replace(/^file:\/\//, "");
+  // file URLs percent-encode characters such as spaces
+  let url = frame.url.startsWith("file:")
+    ? fileURLToPath(frame.url)
+    : frame.url;
   // lib/ of an older revision, extracted by bench/run.ts for ours@<ref>
   const ref = url.match(/\/ref-([0-9a-f]+)\/(.*)$/);
   if (ref) url = `${ref[2]} @${ref[1]}`;

@@ -73,7 +73,7 @@ This runs `bench/run.ts` with `ours@<base>` and `ours` (the working tree, uncomm
 
 The verdict is `better` or `worse` only when every run of one side beats every run of the other and the medians differ by at least `--min-change` percent (default 2). Anything else is `no clear difference`. Rates (`/s`) are better higher; times, peak memory and GC pause are better lower. Use at least 5 runs (the default): with 3, identical code gets a verdict by chance about one time in ten per metric. Before relying on the tool on a new machine, run it once against your own `HEAD` with no changes. Every verdict should be `no clear difference`.
 
-Warnings under the table mean a case doesn't count: connection errors or dropped connections, or an echo case where the server used under 85% CPU, which means k6 was the limit and not the server.
+A case that doesn't count gets `not counted (see warnings)` instead of a verdict, and a warning under the table says why: connection errors or dropped connections, or an echo case where the server used under 85% CPU, which means k6 was the limit and not the server.
 
 ## Evidence
 

@@ -109,9 +109,12 @@ function verdict(
 ) {
   const [bMin, bMax] = [Math.min(...baseValues), Math.max(...baseValues)];
   const [hMin, hMax] = [Math.min(...headValues), Math.max(...headValues)];
-  const change = Math.abs(median(headValues) / median(baseValues) - 1);
   const separate = hMin > bMax || hMax < bMin;
   if (!separate) return "no clear difference";
+  // from a base of 0 (no GC pause at all), any separate change is big enough
+  const baseMedian = median(baseValues);
+  const change =
+    baseMedian === 0 ? Infinity : Math.abs(median(headValues) / baseMedian - 1);
   if (change < minChange) {
     return `no clear difference (consistent, under ${args["min-change"]}%)`;
   }
@@ -143,6 +146,26 @@ for (const [caseName, entry] of Object.entries(results.cases)) {
   const names = Object.keys(baseRuns[0]?.metrics ?? {}).filter(
     (name) => name !== "errors" && name !== "dropped",
   );
+  // a case with any of these doesn't count, so it gets no verdict
+  const problems: string[] = [];
+  for (const [server, runs] of [
+    [base, baseRuns],
+    [head, headRuns],
+  ] as const) {
+    if (runs.some((r) => r.metrics["errors"] || r.metrics["dropped"])) {
+      problems.push(
+        `${caseName}: ${server} had connection errors or dropped connections; its numbers don't count.`,
+      );
+    }
+    const cpu = median(runs.map((r) => r.serverCpu));
+    if (caseName.startsWith("echo") && cpu < 0.85) {
+      problems.push(
+        `${caseName}: ${server} used only ${Math.round(cpu * 100)}% CPU, so k6 may have been the limit, not the server.`,
+      );
+    }
+  }
+  warnings.push(...problems);
+
   const series: [string, (r: RunResult) => number, boolean][] = [
     ...names.map((name): [string, (r: RunResult) => number, boolean] => [
       name,
@@ -156,26 +179,19 @@ for (const [caseName, entry] of Object.entries(results.cases)) {
   for (const [name, pick, higherIsBetter] of series) {
     const b = baseRuns.map(pick);
     const h = headRuns.map(pick);
-    const change = (median(h) - median(b)) / median(b);
+    const baseMedian = median(b);
+    const change = (median(h) - baseMedian) / baseMedian;
+    // a percentage of a base of 0 has no meaning
+    const changeText =
+      baseMedian === 0
+        ? "n/a"
+        : `${change >= 0 ? "+" : ""}${(change * 100).toFixed(1)}%`;
+    const verdictText = problems.length
+      ? "not counted (see warnings)"
+      : verdict(b, h, higherIsBetter);
     lines.push(
-      `| ${caseName} | ${name} | ${format(name, median(b))} | ${format(name, median(h))} | ${change >= 0 ? "+" : ""}${(change * 100).toFixed(1)}% | ${b.map((v) => format(name, v)).join(" / ")} | ${h.map((v) => format(name, v)).join(" / ")} | ${verdict(b, h, higherIsBetter)} |`,
+      `| ${caseName} | ${name} | ${format(name, baseMedian)} | ${format(name, median(h))} | ${changeText} | ${b.map((v) => format(name, v)).join(" / ")} | ${h.map((v) => format(name, v)).join(" / ")} | ${verdictText} |`,
     );
-  }
-  for (const [server, runs] of [
-    [base, baseRuns],
-    [head, headRuns],
-  ] as const) {
-    if (runs.some((r) => r.metrics["errors"] || r.metrics["dropped"])) {
-      warnings.push(
-        `${caseName}: ${server} had connection errors or dropped connections; its numbers don't count.`,
-      );
-    }
-    const cpu = median(runs.map((r) => r.serverCpu));
-    if (caseName.startsWith("echo") && cpu < 0.85) {
-      warnings.push(
-        `${caseName}: ${server} used only ${Math.round(cpu * 100)}% CPU, so k6 may have been the limit, not the server.`,
-      );
-    }
   }
 }
 
